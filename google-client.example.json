@@ -1,0 +1,5 @@
+{
+  "desktopClientId": "여기에-데스크톱-클라이언트-ID.apps.googleusercontent.com",
+  "desktopClientSecret": "여기에-데스크톱-클라이언트-보안-비밀",
+  "webClientId": "여기에-웹-클라이언트-ID.apps.googleusercontent.com"
+}

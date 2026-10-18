@@ -35,6 +35,16 @@ if ($nodeMajor -lt 16 -or $nodeMajor -gt 22) {
 if (-not (Test-Path $Repo)) {
     git clone https://github.com/entrylabs/entry-offline.git $Repo
 }
+# (선택) 구글 드라이브 연동: 키트 폴더의 google-client.json 을 환경변수로
+$GoogleFile = Join-Path $Kit 'google-client.json'
+if (Test-Path $GoogleFile) {
+    $g = Get-Content $GoogleFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($g.desktopClientId)     { $env:GOOGLE_DESKTOP_CLIENT_ID = $g.desktopClientId }
+    if ($g.desktopClientSecret) { $env:GOOGLE_DESKTOP_CLIENT_SECRET = $g.desktopClientSecret }
+    if ($g.webClientId)         { $env:GOOGLE_WEB_CLIENT_ID = $g.webClientId }
+    Write-Host 'google-client.json 읽음 (구글 드라이브 연동 켜짐)'
+}
+
 Push-Location $Repo
 try {
     git fetch --all --quiet

@@ -58,6 +58,16 @@ Write-Host "Android SDK: $sdk"
 
 # ---------- 1. 원본 받기 + 패치 ----------
 if (-not (Test-Path $Repo)) { Run @('git', 'clone', 'https://github.com/entrylabs/entry-offline.git', $Repo) }
+# (선택) 구글 드라이브 연동: 키트 폴더의 google-client.json 을 환경변수로
+$GoogleFile = Join-Path $Kit 'google-client.json'
+if (Test-Path $GoogleFile) {
+    $g = Get-Content $GoogleFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($g.desktopClientId)     { $env:GOOGLE_DESKTOP_CLIENT_ID = $g.desktopClientId }
+    if ($g.desktopClientSecret) { $env:GOOGLE_DESKTOP_CLIENT_SECRET = $g.desktopClientSecret }
+    if ($g.webClientId)         { $env:GOOGLE_WEB_CLIENT_ID = $g.webClientId }
+    Write-Host 'google-client.json 읽음 (구글 드라이브 연동 켜짐)'
+}
+
 Push-Location $Repo
 try {
     git fetch --all --quiet
@@ -80,6 +90,7 @@ finally { Pop-Location }
 # ---------- 3. 앱 자산 조립 + 안드로이드 프로젝트 동기화 ----------
 Push-Location $Mobile
 try {
+    Run @('node', 'scripts/apply-branding.js', (Join-Path $Kit 'branding'))   # 앱 이름·아이콘
     Run @('node', 'scripts/assemble-www.js')
     Run @('npx', 'cap', 'sync', 'android')
 }

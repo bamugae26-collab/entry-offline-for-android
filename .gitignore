@@ -1,3 +1,4 @@
 entry-offline/
 out/
 *.jks
+google-client.json

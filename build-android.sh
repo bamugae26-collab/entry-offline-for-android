@@ -42,10 +42,15 @@ echo "패치 적용 완료"
 #    안드로이드 전용 라이브러리(Capacitor 등)는 mobile/node_modules 에서 가져온다
 (cd "$MOBILE" && npm ci --no-audit --no-fund)
 yarn install --ignore-scripts --network-timeout 300000
+# (선택) 구글 드라이브 연동: 키트 폴더의 google-client.json (환경변수가 우선)
+if [ -f "$KIT/google-client.json" ] && [ -z "${GOOGLE_WEB_CLIENT_ID:-}" ]; then
+  export GOOGLE_WEB_CLIENT_ID="$(node -e 'try{process.stdout.write(require(process.argv[1]).webClientId||"")}catch(e){}' "$KIT/google-client.json")"
+fi
 yarn build:web
 
 # 3. 앱 자산 조립 + 동기화
 cd "$MOBILE"
+node scripts/apply-branding.js "$KIT/branding"   # 앱 이름·아이콘 (branding 폴더가 있으면)
 node scripts/assemble-www.js
 npx cap sync android
 echo "sdk.dir=$SDK" > "$ANDROID/local.properties"
