@@ -1,3 +1,6 @@
+# 엔트리 로컬 APK 를 GitHub 서버에서 빌드한다.
+# 저장소 Actions 탭 → "APK 빌드" → Run workflow, 또는 main 브랜치에 push 하면 실행된다.
+# 결과: 실행 화면 아래 Artifacts 의 "EntryLocal-apk" (zip 안에 .apk)
 name: APK 빌드
 
 on:
@@ -7,6 +10,7 @@ on:
     paths:
       - 'entry-local.patch'
       - 'build-android.sh'
+      - 'branding/**'
       - '.github/workflows/build-apk.yml'
 
 jobs:
@@ -16,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: 디스크 공간 확보
+      - name: 디스크 공간 확보 (앱 자산이 커서)
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost "$AGENT_TOOLSDIRECTORY/CodeQL" || true
 
       - uses: actions/setup-node@v7
@@ -36,8 +40,11 @@ jobs:
 
       - name: APK 빌드
         env:
+          # 저장소 Settings → Secrets 에 넣어 두면 매번 같은 키로 서명 (업데이트 설치 가능)
           ENTRY_KEYSTORE_BASE64: ${{ secrets.ENTRY_KEYSTORE_BASE64 }}
           ENTRY_KEYSTORE_PASSWORD: ${{ secrets.ENTRY_KEYSTORE_PASSWORD }}
+          # (선택) 구글 드라이브 연동. 비워 두면 로그인 기능이 숨겨진 순수 오프라인 앱이 된다.
+          GOOGLE_WEB_CLIENT_ID: ${{ secrets.GOOGLE_WEB_CLIENT_ID }}
         run: bash build-android.sh
 
       - uses: actions/upload-artifact@v7
