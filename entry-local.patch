@@ -8648,18 +8648,19 @@ index 12e1e85b..9ce14ba8 100644
          },
          {
 diff --git a/src/renderer/components/header.scss b/src/renderer/components/header.scss
-index 0fa6192c..082e6bde 100644
+index 0fa6192c..df5277c3 100644
 --- a/src/renderer/components/header.scss
 +++ b/src/renderer/components/header.scss
-@@ -366,3 +366,23 @@
+@@ -366,3 +366,24 @@
  [role='button'] {
      cursor: pointer;
  }
 +
 +/* [entry-local] 구글 로그인 버튼 / 계정 이름 */
-+.text_work_space.no_arrow {
++/* 기존 .group_box .link_workspace_text(margin-top 8px)보다 우선하도록 선택자를 길게 — 높이 25px 알약을 다른 글자(15px)와 가운데 맞춤 */
++.group_box .link_workspace_text.text_work_space.no_arrow {
 +    margin-top: 3px;
-+    margin-right: 4px;
++    margin-right: 0;
 +    padding: 4px 12px;
 +    border: 1px solid rgba(255, 255, 255, 0.85);
 +    border-radius: 14px;
