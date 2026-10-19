@@ -465,10 +465,10 @@ index 00000000..28d6785c
 +</manifest>
 diff --git a/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
 new file mode 100644
-index 00000000..a34109c9
+index 00000000..e5c4d523
 --- /dev/null
 +++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,662 @@
 +package biz.softline.entrylocal;
 +
 +import android.app.Dialog;
@@ -481,10 +481,21 @@ index 00000000..a34109c9
 +import android.util.TypedValue;
 +import android.view.Gravity;
 +import android.view.KeyEvent;
++import android.view.MotionEvent;
++import android.os.SystemClock;
++import android.view.View;
 +import android.view.ViewGroup;
 +import android.view.Window;
 +import android.view.WindowManager;
++import android.util.Base64;
 +import android.webkit.CookieManager;
++import android.webkit.JavascriptInterface;
++import android.webkit.ValueCallback;
++import android.webkit.WebChromeClient;
++import android.widget.FrameLayout;
++import java.io.File;
++import java.io.FileOutputStream;
++import java.util.UUID;
 +import android.webkit.WebResourceRequest;
 +import android.webkit.WebSettings;
 +import android.webkit.WebStorage;
@@ -609,9 +620,50 @@ index 00000000..a34109c9
 +
 +            final WebView web = new WebView(getContext());
 +            configure(web);
-+            root.addView(web, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
++            // 로그인 직후 엔트리 첫 화면 대신 보여 줄 덮개
++            FrameLayout holder = new FrameLayout(getContext());
++            holder.addView(web, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
++            final TextView cover = new TextView(getContext());
++            cover.setText("로그인 확인 중…");
++            cover.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
++            cover.setTextColor(Color.parseColor("#4F80FF"));
++            cover.setGravity(Gravity.CENTER);
++            cover.setBackgroundColor(Color.WHITE);
++            cover.setClickable(true);
++            cover.setVisibility(View.GONE);
++            holder.addView(cover, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
++            root.addView(holder, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
++
++            // 사용자 정보를 읽어 보고 있으면 바로 끝낸다 (페이지가 다 열리기 전에도 0.4초마다)
++            final Runnable[] poll = new Runnable[1];
++            final ValueCallback<String> onUser = (value) -> {
++                if (finished[0]) return;
++                JSObject user = parseUser(value);
++                if (user == null) return;
++                finished[0] = true;
++                main.removeCallbacks(poll[0]);
++                CookieManager.getInstance().flush();
++                JSObject result = new JSObject();
++                result.put("user", user);
++                call.resolve(result);
++                dialog.dismiss();
++            };
++            poll[0] = () -> {
++                if (finished[0]) return;
++                web.evaluateJavascript(USER_SCRIPT, onUser);
++                main.postDelayed(poll[0], 400);
++            };
 +
 +            web.setWebViewClient(new WebViewClient() {
++                @Override
++                public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
++                    if (!finished[0] && isAfterLogin(url)) {
++                        cover.setVisibility(View.VISIBLE);
++                        main.removeCallbacks(poll[0]);
++                        main.postDelayed(poll[0], 400);
++                    }
++                }
++
 +                @Override
 +                public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
 +                    Uri uri = request.getUrl();
@@ -638,18 +690,16 @@ index 00000000..a34109c9
 +                    if (finished[0] || !isAfterLogin(url)) return;
 +                    view.evaluateJavascript(USER_SCRIPT, (value) -> {
 +                        if (finished[0]) return;
-+                        JSObject user = parseUser(value);
-+                        if (user != null) {
-+                            finished[0] = true;
-+                            CookieManager.getInstance().flush();
-+                            JSObject result = new JSObject();
-+                            result.put("user", user);
-+                            call.resolve(result);
-+                            dialog.dismiss();
++                        if (parseUser(value) != null) {
++                            onUser.onReceiveValue(value);
 +                        } else if (!reloadedHome[0]) {
 +                            // 화면 전환만 된 경우 사용자 정보가 없을 수 있어 첫 화면을 한 번 새로 연다
 +                            reloadedHome[0] = true;
 +                            view.loadUrl(ORIGIN + "/");
++                        } else {
++                            // 로그인되지 않은 채 다른 페이지로 갔다 → 덮개를 걷는다
++                            main.removeCallbacks(poll[0]);
++                            cover.setVisibility(View.GONE);
 +                        }
 +                    });
 +                }
@@ -669,6 +719,7 @@ index 00000000..a34109c9
 +            });
 +            dialog.setOnDismissListener((d) -> {
 +                loginDialog = null;
++                main.removeCallbacks(poll[0]);
 +                web.stopLoading();
 +                web.destroy();
 +                if (!finished[0]) {
@@ -747,6 +798,314 @@ index 00000000..a34109c9
 +                cookies.flush();
 +                call.resolve();
 +            });
++        });
++    }
++
++    /**
++     * 엔트리 페이지(url)를 화면 뒤에 몰래 열고 script(Promise 를 돌려주는 JS 식)를 실행해 결과(JSON 글)를 돌려준다.
++     * 엔트리 로그인 세션·CSRF 를 그대로 쓰려고 엔트리 페이지 안에서 요청한다. 앱 화면 뒤에 붙여 두어 그리기도 정상 동작.
++     * 결과: { json: "<JSON>" } / 실패: reject
++     */
++    @PluginMethod
++    public void run(final PluginCall call) {
++        final String url = call.getString("url", "");
++        final String script = call.getString("script", "");
++        final int timeoutMs = call.getInt("timeoutMs", 90000);
++        Uri target = Uri.parse(url);
++        if (!"https".equals(target.getScheme()) || !isEntryHost(target)) {
++            call.reject("엔트리 주소가 아닙니다.");
++            return;
++        }
++        main.post(() -> {
++            final boolean[] finished = { false };
++            final boolean[] started = { false };
++            final String token = UUID.randomUUID().toString();
++            final WebView web = new WebView(getContext());
++            configure(web);
++            web.getSettings().setUserAgentString(web.getSettings().getUserAgentString().replace("; wv", ""));
++            final ViewGroup host = getActivity().findViewById(android.R.id.content);
++            final Runnable cleanup = () -> {
++                try {
++                    host.removeView(web);
++                } catch (Exception ignored) {
++                    // 이미 떨어짐
++                }
++                web.destroy();
++            };
++            final Runnable timeout = () -> {
++                if (finished[0]) return;
++                finished[0] = true;
++                cleanup.run();
++                call.reject("엔트리 응답이 없습니다. 인터넷 연결을 확인해 주세요.", "TIMEOUT");
++            };
++            web.addJavascriptInterface(new Object() {
++                @JavascriptInterface
++                public void done(String t, String payload) {
++                    if (!token.equals(t)) return;
++                    main.post(() -> {
++                        if (finished[0]) return;
++                        finished[0] = true;
++                        main.removeCallbacks(timeout);
++                        cleanup.run();
++                        try {
++                            JSONObject o = new JSONObject(payload);
++                            if (o.optBoolean("ok")) {
++                                JSObject r = new JSObject();
++                                r.put("json", o.optString("json", "null"));
++                                call.resolve(r);
++                            } else {
++                                call.reject(o.optString("error", "엔트리 처리 중 오류"));
++                            }
++                        } catch (Exception e) {
++                            call.reject("엔트리 응답을 읽지 못했습니다.");
++                        }
++                    });
++                }
++            }, "EntryLocalBridge");
++            web.setWebViewClient(new WebViewClient() {
++                @Override
++                public void onPageFinished(WebView view, String loaded) {
++                    if (finished[0] || started[0]) return;
++                    Uri u = Uri.parse(loaded);
++                    if (!isEntryHost(u)) return;
++                    String path = u.getPath() == null ? "" : u.getPath();
++                    if (path.startsWith("/signin")) {
++                        // 로그인 화면으로 돌려보내짐 = 세션 만료
++                        finished[0] = true;
++                        main.removeCallbacks(timeout);
++                        cleanup.run();
++                        call.reject("엔트리 로그인이 만료되었습니다. 다시 로그인해 주세요.", "SIGNED_OUT");
++                        return;
++                    }
++                    started[0] = true;
++                    String wrapped = "Promise.resolve().then(() => " + script + ")" +
++                        ".then((v) => EntryLocalBridge.done('" + token + "', JSON.stringify({ ok: true, json: JSON.stringify(v === undefined ? null : v) })))" +
++                        ".catch((e) => EntryLocalBridge.done('" + token + "', JSON.stringify({ ok: false, error: String((e && e.message) || e) })));";
++                    view.evaluateJavascript(wrapped, null);
++                }
++            });
++            // 앱 화면(Capacitor 웹뷰) 뒤에 실제 크기로 붙인다 → 보이지 않지만 엔트리 화면이 정상적으로 그려짐
++            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(1280), dp(800));
++            host.addView(web, 0, lp);
++            main.postDelayed(timeout, timeoutMs);
++            web.loadUrl(url);
++        });
++    }
++
++    /**
++     * 반자동 저장: 엔트리 작업 화면을 전체 화면 창에 열고, 사이트의 파일 선택(오프라인 작품 불러오기)에
++     * 지금 작품(.ent)을 자동으로 넣어 준다. 창을 닫으면 { projectId } (저장되어 /ws/<id> 주소가 생겼으면).
++     */
++    @PluginMethod
++    public void openWorkspace(final PluginCall call) {
++        final String url = call.getString("url", "");
++        final String base64 = call.getString("ent", "");
++        final String fileName = call.getString("fileName", "project.ent").replaceAll("[\\\\/:*?\"<>|]", "_");
++        final String help = call.getString("help", "");
++        // 자동 진행 (없으면 안내만)
++        final String probeMenu = call.getString("probeMenu", "");
++        final String probePlain = call.getString("probe", "");
++        final JSObject texts = call.getObject("texts", new JSObject());
++        Uri target = Uri.parse(url);
++        if (!"https".equals(target.getScheme()) || !isEntryHost(target)) {
++            call.reject("엔트리 주소가 아닙니다.");
++            return;
++        }
++        final File dir = new File(getContext().getCacheDir(), "entry-save");
++        final File file = new File(dir, fileName);
++        try {
++            dir.mkdirs();
++            try (FileOutputStream out = new FileOutputStream(file)) {
++                out.write(Base64.decode(base64, Base64.DEFAULT));
++            }
++        } catch (Exception e) {
++            call.reject("작품 파일을 준비하지 못했습니다.");
++            return;
++        }
++        main.post(() -> {
++            final String[] projectId = { call.getString("projectId", "") };
++            Dialog dialog = new Dialog(getActivity(), android.R.style.Theme_Material_Light_NoActionBar);
++            dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
++
++            LinearLayout root = new LinearLayout(getContext());
++            root.setOrientation(LinearLayout.VERTICAL);
++            root.setBackgroundColor(Color.WHITE);
++            LinearLayout bar = new LinearLayout(getContext());
++            bar.setOrientation(LinearLayout.HORIZONTAL);
++            bar.setGravity(Gravity.CENTER_VERTICAL);
++            bar.setPadding(dp(16), dp(6), dp(8), dp(6));
++            bar.setBackgroundColor(Color.parseColor("#2C3550"));
++            TextView text = new TextView(getContext());
++            text.setText(help);
++            text.setTextColor(Color.WHITE);
++            text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
++            bar.addView(text, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
++            Button close = new Button(getContext(), null, android.R.attr.borderlessButtonStyle);
++            close.setText("닫기");
++            close.setTextColor(Color.WHITE);
++            bar.addView(close);
++            root.addView(bar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
++
++            final WebView web = new WebView(getContext());
++            configure(web);
++            web.getSettings().setUserAgentString(web.getSettings().getUserAgentString().replace("; wv", ""));
++            root.addView(web, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
++            web.setWebChromeClient(new WebChromeClient() {
++                @Override
++                public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
++                    // 엔트리 '오프라인 작품 불러오기' 등 파일 선택 → 지금 작품 파일을 바로 넣어 준다
++                    callback.onReceiveValue(new Uri[] { Uri.fromFile(file) });
++                    return true;
++                }
++            });
++            close.setOnClickListener((v) -> dialog.dismiss());
++            dialog.setOnKeyListener((d, keyCode, event) -> {
++                if (keyCode == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_UP) {
++                    dialog.dismiss();
++                    return true;
++                }
++                return keyCode == KeyEvent.KEYCODE_BACK;
++            });
++            // ---- 자동 진행: 불러오기 메뉴 누르기 → 다 불러오면 Ctrl+S → 저장되면 창 닫기 ----
++            final boolean[] closed = { false };
++            final boolean[] saved = { false };
++            final boolean[] autoStarted = { false };
++            final String[] phase = { "import" };
++            final long[] phaseAt = { SystemClock.uptimeMillis() };
++            final boolean[] triedSaveClick = { false };
++            final Runnable[] tick = new Runnable[1];
++            final java.util.function.BiConsumer<String, String> go = (next, key) -> {
++                phase[0] = next;
++                phaseAt[0] = SystemClock.uptimeMillis();
++                String t = texts.getString(key);
++                if (t != null && !t.isEmpty()) text.setText(t);
++            };
++            final java.util.function.BiConsumer<JSONObject, Double> tap = (p, dpr) -> {
++                float x = (float) (p.optDouble("x") * dpr);
++                float y = (float) (p.optDouble("y") * dpr);
++                long t0 = SystemClock.uptimeMillis();
++                MotionEvent down = MotionEvent.obtain(t0, t0, MotionEvent.ACTION_DOWN, x, y, 0);
++                MotionEvent up = MotionEvent.obtain(t0, t0 + 60, MotionEvent.ACTION_UP, x, y, 0);
++                web.dispatchTouchEvent(down);
++                web.dispatchTouchEvent(up);
++                down.recycle();
++                up.recycle();
++            };
++            final Runnable ctrlS = () -> {
++                web.requestFocus();
++                long t0 = SystemClock.uptimeMillis();
++                int meta = KeyEvent.META_CTRL_ON | KeyEvent.META_CTRL_LEFT_ON;
++                web.dispatchKeyEvent(new KeyEvent(t0, t0, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_S, 0, meta));
++                web.dispatchKeyEvent(new KeyEvent(t0, t0 + 50, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_S, 0, meta));
++            };
++            tick[0] = () -> {
++                if (closed[0] || probePlain.isEmpty()) return;
++                String script = "import".equals(phase[0]) ? probeMenu : probePlain;
++                web.evaluateJavascript(script, (value) -> {
++                    if (closed[0]) return;
++                    JSONObject st = null;
++                    try {
++                        Object parsed = new JSONTokener(value).nextValue();
++                        if (parsed instanceof JSONObject) st = (JSONObject) parsed;
++                    } catch (Exception ignored) {
++                        // 다음에 다시
++                    }
++                    if (st != null) {
++                        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^/ws/([0-9a-fA-F]{24})").matcher(st.optString("path", ""));
++                        if (m.find()) projectId[0] = m.group(1);
++                        double dpr = st.optDouble("dpr", 1);
++                        long waited = SystemClock.uptimeMillis() - phaseAt[0];
++                        boolean loaded = st.optBoolean("loaded");
++                        if (st.optBoolean("saved")) {
++                            saved[0] = true;
++                            go.accept("done", "done");
++                            main.postDelayed(dialog::dismiss, 1500);
++                            return;
++                        }
++                        switch (phase[0]) {
++                            case "import": {
++                                JSONObject at = st.optJSONObject("importAt");
++                                if (loaded) {
++                                    go.accept("loading", "importing");
++                                } else if (at != null) {
++                                    tap.accept(at, dpr);
++                                    go.accept("loading", "importing");
++                                } else if (waited > (st.optBoolean("ready") ? 12000 : 40000)) {
++                                    go.accept("manual", "manualImport");
++                                }
++                                break;
++                            }
++                            case "loading":
++                            case "manual":
++                                if (loaded) {
++                                    main.postDelayed(ctrlS, 800);
++                                    go.accept("saving", "saving");
++                                } else if ("loading".equals(phase[0]) && waited > 30000) {
++                                    go.accept("manual", "manualImport");
++                                }
++                                break;
++                            case "saving": {
++                                JSONObject at = st.optJSONObject("saveAt");
++                                if (waited > 6000 && !triedSaveClick[0] && at != null) {
++                                    triedSaveClick[0] = true;
++                                    tap.accept(at, dpr);
++                                } else if (waited > 15000) {
++                                    go.accept("waitUser", "manualSave");
++                                }
++                                break;
++                            }
++                            default:
++                                break;
++                        }
++                    }
++                    main.postDelayed(tick[0], 700);
++                });
++            };
++            final WebViewClient base = new WebViewClient() {
++                @Override
++                public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
++                    String scheme = request.getUrl().getScheme();
++                    return !("http".equals(scheme) || "https".equals(scheme));
++                }
++
++                @Override
++                public void doUpdateVisitedHistory(WebView view, String visited, boolean isReload) {
++                    java.util.regex.Matcher m = java.util.regex.Pattern.compile("/ws/([0-9a-fA-F]{24})").matcher(visited == null ? "" : visited);
++                    if (m.find()) projectId[0] = m.group(1);
++                }
++
++                @Override
++                public void onPageFinished(WebView view, String loaded) {
++                    if (!autoStarted[0] && !probePlain.isEmpty()) {
++                        autoStarted[0] = true;
++                        String t = texts.getString("start");
++                        if (t != null && !t.isEmpty()) text.setText(t);
++                        main.postDelayed(tick[0], 700);
++                    }
++                }
++            };
++            web.setWebViewClient(base);
++
++            dialog.setOnDismissListener((d) -> {
++                closed[0] = true;
++                main.removeCallbacks(tick[0]);
++                web.stopLoading();
++                web.destroy();
++                file.delete();
++                CookieManager.getInstance().flush();
++                JSObject r = new JSObject();
++                r.put("projectId", projectId[0]);
++                r.put("saved", saved[0]);
++                call.resolve(r);
++            });
++            dialog.setContentView(root);
++            Window w = dialog.getWindow();
++            if (w != null) {
++                w.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
++                w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
++            }
++            dialog.show();
++            web.loadUrl(url);
 +        });
 +    }
 +
@@ -7284,10 +7643,10 @@ index dc07af56..8c75ef68 100644
          "dist:mac": "cross-env NODE_ENV=production NODE_OPTIONS=--openssl-legacy-provider webpack && cross-env NOTARIZE=false electron-builder -c --mac",
 diff --git a/scripts/mock-entry.js b/scripts/mock-entry.js
 new file mode 100644
-index 00000000..fbced3f9
+index 00000000..7aa00810
 --- /dev/null
 +++ b/scripts/mock-entry.js
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,187 @@
 +#!/usr/bin/env node
 +/**
 + * [entry-local] 시험용 가짜 엔트리(playentry.org) 서버
@@ -7303,7 +7662,42 @@ index 00000000..fbced3f9
 +const port = Number(process.argv[2] || 8300);
 +const USER = { id: '64f0c0ffee0000000000abcd', username: 'Trapi0332', nickname: '트래피' };
 +const sessions = new Set();
-+const counters = { logins: 0, homeViews: 0 };
++const counters = { logins: 0, homeViews: 0, graphql: 0, downloads: 0, saves: 0 };
++const fs = require('fs');
++const SAMPLE_ENT = process.env.MOCK_ENT || '';
++const uploads = []; // '오프라인 작품 불러오기'로 들어온 파일 { name, size, gzip }
++const PROJECTS = [
++    { id: '6500000000000000000000a1', name: '계정 작품 하나', thumb: '/uploads/thumb/a1.png', created: '2026-10-01T01:00:00.000Z', updated: '2026-10-18T10:00:00.000Z', isopen: true },
++    { id: '6500000000000000000000a2', name: '비공개 연습', thumb: null, created: '2026-10-02T01:00:00.000Z', updated: '2026-10-17T10:00:00.000Z', isopen: false },
++];
++const PNG_1PX = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
++const wsPage = (id) => `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>작업</title><meta name="csrf-token" content="mock-csrf">
++<style>body{font-family:sans-serif;margin:0} header{height:60px;background:#4f80ff;display:flex;align-items:center;gap:10px;padding:0 16px;color:#fff}
++.dd{position:absolute;top:56px;left:16px;background:#fff;color:#222;border:1px solid #ccc;display:none} .dd.open{display:block} .dd div{padding:10px 18px;cursor:pointer}
++main{padding:30px}</style></head>
++<body><header><span class="btn_workspace_file" title="파일" style="display:inline-block;width:40px;height:30px;background:#fff3;border-radius:8px"></span><span>엔트리 만들기 ${id || 'new'}</span></header>
++<div class="dd" id="dd"><div id="mnew">새로 만들기</div><div id="mimport">${process.env.MOCK_IMPORT_LABEL || "오프라인 작품 불러오기"}</div><div>내 컴퓨터에 저장하기</div></div>
++<input type="file" id="file" accept=".ent" style="display:none">
++<main><p id="status">불러온 작품 없음</p><button id="save">저장하기</button></main>
++<script>
++let current = { name: ${JSON.stringify(id ? '계정 작품 하나' : '새 작품')}, objects: [{ id: 'o1' }] };
++setTimeout(() => { window.Entry = { container: {}, playground: {}, engine: {}, exportProject: () => current, loadProject: (p) => { current = p; } }; }, 1200);
++document.querySelector('.btn_workspace_file').onclick = () => document.getElementById('dd').classList.toggle('open');
++document.getElementById('mimport').onclick = () => { document.getElementById('dd').classList.remove('open'); document.getElementById('file').click(); };
++document.getElementById('file').onchange = async (e) => {
++  const f = e.target.files[0]; const b = new Uint8Array(await f.arrayBuffer());
++  document.getElementById('status').textContent = f.name + ' ' + f.size;
++  await fetch('/_mock/uploaded', { method: 'POST', body: JSON.stringify({ name: f.name, size: f.size, gzip: b[0] === 0x1f && b[1] === 0x8b }) });
++  setTimeout(() => window.Entry.loadProject({ name: '불러온 작품', objects: [{ id: 'x' }] }), 500);
++};
++const save = async () => {
++  const r = await fetch('/graphql/SAVE_PROJECT', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
++  if (r.ok && location.pathname === '/ws/new') history.pushState({}, '', '/ws/6500000000000000000000b9');
++  document.getElementById('status').textContent += ' / 저장됨';
++};
++document.getElementById('save').onclick = save;
++document.addEventListener('keydown', (e) => { if (e.ctrlKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); save(); } });
++</script></body></html>`;
 +
 +const page = (title, body, nextData) => `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${title}</title>
 +<meta name="csrf-token" content="mock-csrf"><meta name="viewport" content="width=device-width"></head>
@@ -7324,6 +7718,73 @@ index 00000000..fbced3f9
 +    if (url.pathname === '/_mock/state') {
 +        res.writeHead(200, { 'Content-Type': 'application/json' });
 +        return res.end(JSON.stringify({ sessions: sessions.size, counters }));
++    }
++    if (url.pathname === '/_mock/uploaded' || url.pathname === '/_mock/saved') {
++        let body = '';
++        req.on('data', (c) => (body += c));
++        req.on('end', () => {
++            if (url.pathname === '/_mock/uploaded') {
++                uploads.push(JSON.parse(body || '{}'));
++            } else {
++                counters.saves++;
++            }
++            res.writeHead(200, { 'Content-Type': 'application/json' });
++            res.end('{"ok":true}');
++        });
++        return;
++    }
++    if (url.pathname === '/_mock/uploads') {
++        res.writeHead(200, { 'Content-Type': 'application/json' });
++        return res.end(JSON.stringify({ uploads, counters }));
++    }
++    if (url.pathname.startsWith('/uploads/thumb/')) {
++        res.writeHead(200, { 'Content-Type': 'image/png' });
++        return res.end(PNG_1PX);
++    }
++    if (url.pathname === '/graphql/SAVE_PROJECT' && req.method === 'POST') {
++        counters.saves++;
++        res.writeHead(sessionOf(req) ? 200 : 401, { 'Content-Type': 'application/json' });
++        return res.end('{"data":{}}');
++    }
++    if (url.pathname === '/graphql/SELECT_USER_PROJECTS' && req.method === 'POST') {
++        let body = '';
++        req.on('data', (c) => (body += c));
++        req.on('end', () => {
++            counters.graphql++;
++            const j = JSON.parse(body || '{}');
++            const okHeaders = req.headers['csrf-token'] === 'mock-csrf';
++            if (!sessionOf(req) || !okHeaders) {
++                res.writeHead(401, { 'Content-Type': 'application/json' });
++                return res.end('{"errors":[{"message":"unauthorized"}]}');
++            }
++            const v = j.variables || {};
++            const ok = v.user === USER.id && v.isOpen === 'all';
++            res.writeHead(200, { 'Content-Type': 'application/json' });
++            res.end(JSON.stringify({ data: { userProjectList: { total: ok ? PROJECTS.length : 0, list: ok ? PROJECTS.slice(v.pageParam.start, v.pageParam.start + v.pageParam.display) : [] } } }));
++        });
++        return;
++    }
++    if (url.pathname === '/rest/project/download' && req.method === 'POST') {
++        let body = '';
++        req.on('data', (c) => (body += c));
++        req.on('end', () => {
++            const j = JSON.parse(body || '{}');
++            if (!sessionOf(req) || !j.content || !Array.isArray(j.content.objects) || !SAMPLE_ENT) {
++                res.writeHead(400);
++                return res.end('bad');
++            }
++            counters.downloads++;
++            res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
++            res.end(fs.readFileSync(SAMPLE_ENT));
++        });
++        return;
++    }
++    if (url.pathname.startsWith('/ws/')) {
++        const id = url.pathname.slice(4);
++        if (id !== 'new' && !sessionOf(req)) {
++            return send(302, '', { Location: '/signin' });
++        }
++        return send(200, wsPage(id === 'new' ? '' : id));
 +    }
 +    if (url.pathname === '/_mock/expire') {
 +        sessions.clear();
@@ -7764,6 +8225,17 @@ index 00000000..86986717
 +        })`
 +    );
 +}
+diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
+new file mode 100644
+index 00000000..681f1462
+--- /dev/null
++++ b/src/common/buildInfo.ts
+@@ -0,0 +1,5 @@
++/**
++ * [entry-local] 패치 버전 — 내 작품 창 아래에 표시된다.
++ * 태블릿·PC 에 설치된 앱이 최신 패치로 빌드된 것인지 확인하는 용도. 패치를 낼 때마다 올린다.
++ */
++export const ENTRY_LOCAL_BUILD = '2026.10.20-b (엔트리 계정 작품·자동 저장)';
 diff --git a/src/common/driveClient.ts b/src/common/driveClient.ts
 new file mode 100644
 index 00000000..2e0a75fe
@@ -8105,10 +8577,10 @@ index 00000000..2e0a75fe
 +}
 diff --git a/src/common/entryAccount.ts b/src/common/entryAccount.ts
 new file mode 100644
-index 00000000..c54f9d51
+index 00000000..f0a049f7
 --- /dev/null
 +++ b/src/common/entryAccount.ts
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,256 @@
 +/**
 + * [entry-local] 엔트리(playentry.org) 계정 — Windows·안드로이드 공통 상수
 + *
@@ -8181,6 +8653,190 @@ index 00000000..c54f9d51
 +        return false;
 +    }
 +}
++
++/* ------------------------------------------------------------------ */
++/* 엔트리 계정 작품 — 엔트리 페이지 안에서 실행하는 스크립트            */
++/* (엔트리 로그인 세션·CSRF 토큰을 그대로 쓰려고 엔트리 페이지 안에서 요청) */
++/* ------------------------------------------------------------------ */
++
++export type EntryProjectMeta = {
++    id: string;
++    name: string;
++    thumb?: string;
++    created?: string;
++    updated?: string;
++    isopen?: boolean;
++};
++
++export const entryWorkspaceUrl = (projectId?: string, base = ENTRY_ORIGIN) =>
++    projectId ? `${base}/ws/${encodeURIComponent(projectId)}` : `${base}/ws/new`;
++export const entryProjectPageUrl = (projectId: string) => `${ENTRY_ORIGIN}/project/${encodeURIComponent(projectId)}`;
++export const entryThumbUrl = (thumb?: string, base = ENTRY_ORIGIN) =>
++    !thumb ? undefined : /^https?:/.test(thumb) ? thumb : `${base}${thumb.startsWith('/') ? '' : '/'}${thumb}`;
++
++/** 작업 화면 주소에서 작품 id (/ws/<24자리 hex>) */
++export function projectIdFromWorkspaceUrl(url: string) {
++    const m = /\/ws\/([0-9a-f]{24})(?:[/?#]|$)/i.exec(url || '');
++    return m ? m[1] : undefined;
++}
++
++// 엔트리 페이지의 CSRF·x-token 헤더
++const HEADERS_FN = `function __entryHeaders() {
++  const h = { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Client-Type': 'Client' };
++  const meta = document.querySelector('meta[name="csrf-token"]');
++  if (meta && meta.content) h['CSRF-Token'] = meta.content;
++  try { const x = localStorage.getItem('playentry_token'); if (x) h['x-token'] = x; } catch (e) {}
++  return h;
++}`;
++
++/** 내 작품 목록 (최근 수정 순) → { total, list } */
++export function listProjectsScript(userId: string, start: number, display: number) {
++    const query =
++        'query SELECT_USER_PROJECTS($user: String!, $pageParam: PageParam, $isOpen: String, $term: String) {' +
++        ' userProjectList(user: $user, pageParam: $pageParam, isOpen: $isOpen, term: $term) {' +
++        ' total list { id name thumb created updated isopen } } }';
++    const body = JSON.stringify({
++        operationName: 'SELECT_USER_PROJECTS',
++        query,
++        variables: { user: userId, pageParam: { display, sort: 'updated', start, order: 'desc' }, isOpen: 'all', term: 'all' },
++    });
++    return `(async () => {
++  ${HEADERS_FN}
++  const res = await fetch('/graphql/SELECT_USER_PROJECTS', { method: 'POST', credentials: 'include', headers: __entryHeaders(), body: ${JSON.stringify(body)} });
++  if (res.status === 401 || res.status === 403) throw new Error('엔트리 로그인이 만료되었습니다. 다시 로그인해 주세요.');
++  if (!res.ok) throw new Error('엔트리 작품 목록을 받지 못했습니다 (' + res.status + ')');
++  const j = await res.json();
++  if (j.errors && j.errors.length) throw new Error('엔트리 작품 목록 오류: ' + (j.errors[0].message || ''));
++  const d = j.data && j.data.userProjectList;
++  return { total: d ? d.total : 0, list: d && d.list ? d.list : [] };
++})()`;
++}
++
++/**
++ * 작업 화면(/ws/<id>)에 열린 작품을 .ent 로 받아 base64 로 돌려준다.
++ * 엔트리가 작품을 다 불러올 때까지 기다린 뒤 Entry.exportProject() → POST /rest/project/download
++ */
++export function exportProjectScript(fallbackName: string) {
++    return `(async () => {
++  ${HEADERS_FN}
++  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
++  const started = Date.now();
++  let project;
++  while (Date.now() - started < 60000) {
++    try {
++      const E = window.Entry;
++      if (E && typeof E.exportProject === 'function' && E.container && E.playground && E.engine) {
++        const p = E.exportProject();
++        if (p && Array.isArray(p.objects) && (p.objects.length || Date.now() - started > 15000)) { project = p; break; }
++      }
++    } catch (e) {}
++    await sleep(500);
++  }
++  if (!project) throw new Error('엔트리 작업 화면에서 작품을 불러오지 못했습니다.');
++  const name = project.name || ${JSON.stringify(fallbackName)};
++  const res = await fetch('/rest/project/download', { method: 'POST', credentials: 'include', headers: __entryHeaders(), body: JSON.stringify({ content: project, name }) });
++  if (!res.ok) throw new Error('엔트리 작품 파일을 받지 못했습니다 (' + res.status + ')');
++  let buf = new Uint8Array(await res.arrayBuffer());
++  if (!(buf[0] === 0x1f && buf[1] === 0x8b)) {
++    // 파일 대신 주소를 돌려주는 경우
++    let link = '';
++    try { const j = JSON.parse(new TextDecoder().decode(buf)); link = j.url || j.path || j.filename || ''; } catch (e) {}
++    if (!link) throw new Error('엔트리 작품 파일 형식이 다릅니다.');
++    const r2 = await fetch(link, { credentials: 'include' });
++    buf = new Uint8Array(await r2.arrayBuffer());
++    if (!(buf[0] === 0x1f && buf[1] === 0x8b)) throw new Error('엔트리 작품 파일 형식이 다릅니다.');
++  }
++  let bin = '';
++  for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
++  return { name, base64: btoa(bin) };
++})()`;
++}
++
++/** 반자동 저장 창 안내 문구 */
++export const SAVE_VIA_SITE_HELP =
++    '① 엔트리 화면 왼쪽 위 [파일] 메뉴 → [오프라인 작품 불러오기]를 누르세요. 지금 작품 파일이 자동으로 선택됩니다.  ② 작품이 열리면 [저장하기]를 누르세요.  ③ 저장이 끝나면 이 창을 닫으세요.';
++
++/* ------------------------------------------------------------------ */
++/* 계정 저장 자동 진행 — 엔트리 작업 화면 안에서 상태를 살피는 스크립트    */
++/* 앱(Windows·안드로이드)이 0.7초마다 실행해 결과를 보고 진짜 클릭·키 입력을 보낸다. */
++/* ------------------------------------------------------------------ */
++
++export type AutoSaveProbe = {
++    ready: boolean; // 엔트리 편집기 준비됨
++    loaded: boolean; // '오프라인 작품 불러오기'로 작품을 다 불러옴
++    saved: boolean; // 저장 요청이 성공함 (또는 새 작품 주소가 생김)
++    path: string;
++    importAt?: { x: number; y: number } | null; // [오프라인 작품 불러오기] 위치 (CSS px)
++    saveAt?: { x: number; y: number } | null; // [저장하기] 위치
++    dpr: number;
++};
++
++export const AUTO_IMPORT_LABELS = ['오프라인 작품 불러오기', '오프라인 작품 열기', '내 컴퓨터에서 불러오기', '파일 불러오기'];
++
++/** openMenu: 불러오기 항목이 안 보이면 [파일] 메뉴로 보이는 것을 하나씩 눌러 본다 */
++export function autoSaveProbeScript(openMenu: boolean) {
++    return `(() => {
++  const w = window;
++  if (!w.__el) {
++    w.__el = { loaded: false, saved: false, startPath: location.pathname, ti: 0 };
++    const SAVE_RE = /\\/graphql\\/[A-Z_]*(SAVE|CREATE|UPDATE|INSERT)[A-Z_]*PROJECT|\\/graphql\\/[A-Z_]*PROJECT[A-Z_]*(SAVE|CREATE|UPDATE|INSERT)/i;
++    const mark = (url, status) => { if (status >= 200 && status < 300 && SAVE_RE.test(String(url))) w.__el.saved = true; };
++    const f0 = w.fetch;
++    w.fetch = function (input, init) {
++      const url = typeof input === 'string' ? input : (input && input.url) || '';
++      const method = (init && init.method) || (input && input.method) || 'GET';
++      const p = f0.apply(this, arguments);
++      if (String(method).toUpperCase() === 'POST') p.then((r) => mark(url, r.status)).catch(() => {});
++      return p;
++    };
++    const o0 = XMLHttpRequest.prototype.open, s0 = XMLHttpRequest.prototype.send;
++    XMLHttpRequest.prototype.open = function (m, u) { this.__elM = m; this.__elU = u; return o0.apply(this, arguments); };
++    XMLHttpRequest.prototype.send = function () {
++      if (String(this.__elM).toUpperCase() === 'POST') this.addEventListener('load', () => mark(this.__elU, this.status));
++      return s0.apply(this, arguments);
++    };
++  }
++  const E = w.Entry;
++  if (E && typeof E.loadProject === 'function' && !E.loadProject.__elWrapped) {
++    const orig = E.loadProject;
++    const wrapped = function () { const r = orig.apply(this, arguments); setTimeout(() => { w.__el.loaded = true; }, 1500); return r; };
++    wrapped.__elWrapped = true;
++    E.loadProject = wrapped;
++  }
++  const ready = !!(E && E.container && E.playground && E.engine && typeof E.exportProject === 'function');
++  const vis = (e) => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
++  const all = () => [...document.querySelectorAll('body *')].filter((e) => !e.closest('#entry-local-save-help'));
++  const byText = (texts) => {
++    const list = all();
++    for (const t of texts) {
++      const el = list.find((e) => (e.textContent || '').trim() === t && ![...e.children].some((c) => (c.textContent || '').trim() === t) && vis(e));
++      if (el) return el;
++    }
++    return null;
++  };
++  const at = (el) => { if (!el) return null; const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; };
++  const IMPORT = ${JSON.stringify(AUTO_IMPORT_LABELS)};
++  let importEl = byText(IMPORT);
++  if (!importEl && ready && ${openMenu ? 'true' : 'false'}) {
++    const triggers = all().filter((e) => vis(e) && e.getBoundingClientRect().top < 140 && (
++      (e.textContent || '').trim() === '파일' || /파일/.test(e.getAttribute('title') || '') || /파일/.test(e.getAttribute('aria-label') || '') ||
++      (typeof e.className === 'string' && /(^|[^a-z])file/i.test(e.className) && /button|^a$|^div$|^span$/i.test(e.tagName))));
++    if (triggers.length) { const t = triggers[w.__el.ti++ % Math.min(triggers.length, 6)]; try { t.click(); } catch (e) {} }
++  }
++  const newSaved = /^\\/ws\\/new/.test(w.__el.startPath) && /^\\/ws\\/[0-9a-f]{24}/i.test(location.pathname);
++  return { ready, loaded: !!w.__el.loaded, saved: !!w.__el.saved || newSaved, path: location.pathname, importAt: at(importEl), saveAt: at(byText(['저장하기'])), dpr: w.devicePixelRatio || 1 };
++})()`;
++}
++
++/** 자동 진행 단계별 안내 문구 */
++export const AUTO_SAVE_TEXT = {
++    start: '자동으로 저장하는 중입니다… (1/3 엔트리 화면 여는 중) 화면을 누르지 말고 잠시 기다려 주세요.',
++    importing: '자동으로 저장하는 중입니다… (2/3 작품 불러오는 중)',
++    saving: '자동으로 저장하는 중입니다… (3/3 엔트리에 저장하는 중)',
++    done: '엔트리 계정에 저장했습니다. 창을 닫습니다.',
++    manualImport: '자동 불러오기를 못 했습니다. [파일] 메뉴 → [오프라인 작품 불러오기]를 눌러 주세요 (작품 파일은 자동으로 들어갑니다). 그 뒤 [저장하기]를 누르면 창이 자동으로 닫힙니다.',
++    manualSave: '작품을 불러왔습니다. 엔트리의 [저장하기]를 눌러 주세요. 저장되면 창이 자동으로 닫힙니다.',
++};
 diff --git a/src/main/cloudDrive.ts b/src/main/cloudDrive.ts
 new file mode 100644
 index 00000000..9673de3c
@@ -8598,23 +9254,31 @@ index fd44b8ce..841f484e 100644
          }
 diff --git a/src/main/entryAccount.ts b/src/main/entryAccount.ts
 new file mode 100644
-index 00000000..3ca226b3
+index 00000000..9de72edb
 --- /dev/null
 +++ b/src/main/entryAccount.ts
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,522 @@
 +import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
 +import path from 'path';
 +import fs from 'fs-extra';
 +import createLogger from './utils/functions/createLogger';
++import MainUtils from './mainUtils';
 +import {
 +    ENTRY_ORIGIN,
 +    EntryStatus,
 +    EntryUser,
++    AUTO_SAVE_TEXT,
++    AutoSaveProbe,
 +    USER_SCRIPT,
++    autoSaveProbeScript,
 +    entryProfileUrl,
++    entryWorkspaceUrl,
++    exportProjectScript,
 +    isAllowedExternalUrl,
 +    isEntryPageAfterLogin,
++    listProjectsScript,
 +    normalizeEntryUser,
++    projectIdFromWorkspaceUrl,
 +} from '../common/entryAccount';
 +
 +/**
@@ -8750,8 +9414,18 @@ index 00000000..3ca226b3
 +                // 화면 전환만 된 경우 사용자 정보가 페이지에 없을 수 있어 첫 화면을 한 번 새로 연다
 +                reloadedHome = true;
 +                win.loadURL(`${BASE}/`).catch(() => undefined);
++            } else if (!win.isDestroyed() && !win.isVisible() && !win.webContents.isLoading()) {
++                // 로그인되지 않은 채 다른 페이지로 갔다 → 창을 다시 보여 준다
++                win.show();
 +            }
 +        };
++        // 로그인 직후 엔트리 첫 화면은 보여 주지 않는다: 창을 숨기고 사용자 정보를 읽는 즉시 닫는다
++        win.webContents.on('did-navigate', (_e, url) => {
++            if (!done && isEntryPageAfterLogin(url, BASE) && win.isVisible()) {
++                win.hide();
++            }
++        });
++        win.webContents.on('dom-ready', check);
 +
 +        // 네이버·웨일 스페이스 로그인 같은 팝업은 같은 세션의 작은 창으로
 +        win.webContents.setWindowOpenHandler(() => ({
@@ -8815,6 +9489,265 @@ index 00000000..3ca226b3
 +    return status();
 +}
 +
++/* ---------------- 엔트리 계정 작품 ---------------- */
++const tmpDir = () => path.join(app.getPath('userData'), 'entry-tmp');
++
++function requireUser(): EntryUser {
++    ensureLoaded();
++    if (!user) {
++        throw new Error('엔트리 계정으로 로그인해 주세요.');
++    }
++    return user;
++}
++
++/** 엔트리 페이지를 보이지 않는 창에 열고 스크립트(Promise 를 돌려주는 식)를 실행 */
++async function runInEntry<T>(url: string, script: string, timeoutMs = 90000): Promise<T> {
++    const win = new BrowserWindow({
++        show: false,
++        width: 1280,
++        height: 800,
++        webPreferences: {
++            partition: PARTITION,
++            contextIsolation: true,
++            nodeIntegration: false,
++            sandbox: true,
++            backgroundThrottling: false,
++        },
++    });
++    let timer: ReturnType<typeof setTimeout> | undefined;
++    try {
++        return await Promise.race([
++            (async () => {
++                await win.loadURL(url);
++                if (!isEntryPageAfterLogin(win.webContents.getURL(), BASE)) {
++                    // 로그인 화면으로 돌려보내졌다 = 세션 만료
++                    saveUser(undefined);
++                    throw new Error('엔트리 로그인이 만료되었습니다. 다시 로그인해 주세요.');
++                }
++                return (await win.webContents.executeJavaScript(script, true)) as T;
++            })(),
++            new Promise<T>((_, reject) => {
++                timer = setTimeout(() => reject(new Error('엔트리 응답이 없습니다. 인터넷 연결을 확인해 주세요.')), timeoutMs);
++            }),
++        ]);
++    } finally {
++        if (timer) {
++            clearTimeout(timer);
++        }
++        if (!win.isDestroyed()) {
++            win.destroy();
++        }
++    }
++}
++
++async function listProjects(start = 0, display = 60) {
++    const me = requireUser();
++    return runInEntry<{ total: number; list: any[] }>(`${BASE}/`, listProjectsScript(me.id, start, display), 30000);
++}
++
++async function loadProject(projectId: string, name: string) {
++    requireUser();
++    const result = await runInEntry<{ name: string; base64: string }>(
++        entryWorkspaceUrl(projectId, BASE),
++        exportProjectScript(name || '엔트리 작품')
++    );
++    const tmp = path.join(tmpDir(), `${projectId.replace(/[^a-z0-9]/gi, '')}.ent`);
++    await fs.outputFile(tmp, Buffer.from(result.base64, 'base64'));
++    try {
++        const project = await MainUtils.loadProject(tmp);
++        project.entryProjectId = projectId;
++        project.name = result.name || name || project.name;
++        delete project.savedPath;
++        delete project.cloudFileId;
++        return project;
++    } finally {
++        fs.remove(tmp).catch(() => undefined);
++    }
++}
++
++/**
++ * 반자동 저장: 엔트리 작업 화면을 앱 안 창에 열고, 사이트의 '오프라인 작품 불러오기' 파일 선택에
++ * 지금 작품(.ent)을 자동으로 넣어 준다. 사용자가 엔트리의 [저장하기]를 누르면 계정에 저장된다.
++ * 창을 닫으면 { projectId } (저장되어 작품 주소가 생겼으면).
++ */
++let saveInProgress: Promise<{ projectId?: string; saved?: boolean }> | undefined;
++function saveViaSite(project: any, options: { entryProjectId?: string; name: string }) {
++    requireUser();
++    if (saveInProgress) {
++        return saveInProgress;
++    }
++    saveInProgress = (async () => {
++        // 파일 이름은 영문으로: 한글 경로는 파일 자동 입력이 조용히 실패한다 (작품 이름은 .ent 안에 들어 있음)
++        const tmp = path.join(tmpDir(), `${Date.now()}`, 'entry-local-project.ent');
++        await fs.ensureDir(path.dirname(tmp));
++        await MainUtils.saveProject(project, tmp);
++        try {
++            return await new Promise<{ projectId?: string; saved?: boolean }>((resolve, reject) => {
++                const parent = mainWindow();
++                const win = new BrowserWindow({
++                    parent,
++                    modal: !!parent,
++                    width: 1280,
++                    height: 820,
++                    title: '엔트리 계정에 저장',
++                    autoHideMenuBar: true,
++                    backgroundColor: '#ffffff',
++                    webPreferences: { partition: PARTITION, contextIsolation: true, nodeIntegration: false, sandbox: true },
++                });
++                win.setMenuBarVisibility(false);
++                let projectId = options.entryProjectId;
++                let saved = false;
++                const track = (url: string) => {
++                    projectId = projectIdFromWorkspaceUrl(url) || projectId;
++                };
++                let bannerText = AUTO_SAVE_TEXT.start;
++                const banner = (text = bannerText) => {
++                    bannerText = text;
++                    win.setTitle(`엔트리 계정에 저장 — ${text}`);
++                    const code = `(() => {
++                        let d = document.getElementById('entry-local-save-help');
++                        if (!d) {
++                            d = document.createElement('div');
++                            d.id = 'entry-local-save-help';
++                            d.style.cssText = 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:2147483647;max-width:min(900px,92vw);padding:10px 16px;border-radius:10px;background:rgba(32,40,60,.92);color:#fff;font:14px/1.6 sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.3);pointer-events:none';
++                            document.body.appendChild(d);
++                        }
++                        d.textContent = ${JSON.stringify(text)};
++                    })()`;
++                    if (!win.isDestroyed()) {
++                        win.webContents.executeJavaScript(code).catch(() => undefined);
++                    }
++                };
++                const dbg = win.webContents.debugger;
++                const intercept = async () => {
++                    try {
++                        if (!dbg.isAttached()) {
++                            dbg.attach('1.3');
++                        }
++                        await dbg.sendCommand('Page.enable');
++                        await dbg.sendCommand('Page.setInterceptFileChooserDialog', { enabled: true });
++                    } catch (e) {
++                        logger.warn(`파일 선택 자동 입력 준비 실패: ${(e as Error).message}`);
++                    }
++                };
++                dbg.on('message', (_event, method, params) => {
++                    if (method === 'Page.fileChooserOpened' && params && params.backendNodeId) {
++                        dbg.sendCommand('DOM.setFileInputFiles', { files: [tmp], backendNodeId: params.backendNodeId }).catch((e) =>
++                            logger.warn(`파일 자동 입력 실패: ${e.message}`)
++                        );
++                    }
++                });
++                win.webContents.on('did-navigate', (_e, url) => track(url));
++                win.webContents.on('did-navigate-in-page', (_e, url) => track(url));
++                // ---- 자동 진행: 불러오기 메뉴 누르기 → 다 불러오면 Ctrl+S → 저장되면 창 닫기 ----
++                let autoStarted = false;
++                const autoRun = async () => {
++                    if (autoStarted) {
++                        return;
++                    }
++                    autoStarted = true;
++                    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
++                    const probe = async (openMenu: boolean): Promise<AutoSaveProbe | undefined> => {
++                        if (win.isDestroyed()) {
++                            return undefined;
++                        }
++                        try {
++                            return await win.webContents.executeJavaScript(autoSaveProbeScript(openMenu));
++                        } catch (e) {
++                            return undefined;
++                        }
++                    };
++                    const click = (p: { x: number; y: number }) => {
++                        win.webContents.sendInputEvent({ type: 'mouseDown', x: p.x, y: p.y, button: 'left', clickCount: 1 });
++                        win.webContents.sendInputEvent({ type: 'mouseUp', x: p.x, y: p.y, button: 'left', clickCount: 1 });
++                    };
++                    const ctrlS = () => {
++                        win.webContents.focus();
++                        win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 's', modifiers: ['control'] });
++                        win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 's', modifiers: ['control'] });
++                    };
++                    let phase: 'import' | 'loading' | 'saving' | 'manual' = 'import';
++                    let phaseAt = Date.now();
++                    let triedSaveClick = false;
++                    const go = (next: typeof phase, text: string) => {
++                        phase = next;
++                        phaseAt = Date.now();
++                        banner(text);
++                    };
++                    while (!win.isDestroyed()) {
++                        await sleep(700);
++                        const st = await probe(phase === 'import');
++                        if (!st) {
++                            continue;
++                        }
++                        track(`${BASE}${st.path}`);
++                        if (st.saved) {
++                            saved = true;
++                            banner(AUTO_SAVE_TEXT.done);
++                            await sleep(1500);
++                            if (!win.isDestroyed()) {
++                                win.close();
++                            }
++                            return;
++                        }
++                        const waited = Date.now() - phaseAt;
++                        if (phase === 'import') {
++                            if (st.loaded) {
++                                go('loading', AUTO_SAVE_TEXT.importing);
++                            } else if (st.importAt) {
++                                click(st.importAt);
++                                go('loading', AUTO_SAVE_TEXT.importing);
++                            } else if (waited > (st.ready ? 12000 : 40000)) {
++                                go('manual', AUTO_SAVE_TEXT.manualImport);
++                            }
++                        } else if (phase === 'loading' || phase === 'manual') {
++                            if (st.loaded) {
++                                await sleep(800);
++                                ctrlS();
++                                go('saving', AUTO_SAVE_TEXT.saving);
++                            } else if (phase === 'loading' && waited > 30000) {
++                                go('manual', AUTO_SAVE_TEXT.manualImport);
++                            }
++                        } else if (phase === 'saving') {
++                            if (waited > 6000 && !triedSaveClick && st.saveAt) {
++                                triedSaveClick = true;
++                                click(st.saveAt);
++                            } else if (waited > 15000) {
++                                banner(AUTO_SAVE_TEXT.manualSave);
++                                phaseAt = Date.now() + 3600000; // 더 이상 바꾸지 않음 (저장되면 위에서 닫힘)
++                            }
++                        }
++                    }
++                };
++                win.webContents.on('did-finish-load', () => {
++                    intercept();
++                    banner();
++                    autoRun();
++                });
++                win.on('closed', () => {
++                    if (parent && !parent.isDestroyed()) {
++                        parent.focus();
++                    }
++                    resolve({ projectId, saved });
++                });
++                // 디버거 명령은 첫 페이지가 열린 뒤에 보내야 한다 (그 전에 보내면 응답이 오지 않음) → did-finish-load 에서
++                win.loadURL(entryWorkspaceUrl(options.entryProjectId, BASE)).catch((e) => {
++                    logger.warn(`엔트리 작업 화면 열기 실패: ${e.message}`);
++                    if (!win.isDestroyed()) {
++                        win.destroy();
++                    }
++                    reject(new Error('엔트리 작업 화면을 열 수 없습니다. 인터넷 연결을 확인해 주세요.'));
++                });
++            });
++        } finally {
++            fs.remove(path.dirname(tmp)).catch(() => undefined);
++        }
++    })().finally(() => {
++        saveInProgress = undefined;
++    });
++    return saveInProgress;
++}
++
 +const wrap = (fn: (...args: any[]) => any) => async (event: any, ...args: any[]) => {
 +    try {
 +        return await fn(...args);
@@ -8827,6 +9760,10 @@ index 00000000..3ca226b3
 +ipcMain.handle('entry:verify', wrap(() => verify()));
 +ipcMain.handle('entry:login', wrap(() => login()));
 +ipcMain.handle('entry:logout', wrap(() => logout()));
++ipcMain.handle('entry:projects', wrap((start, display) => listProjects(start, display)));
++ipcMain.handle('entry:load', wrap((projectId, name) => loadProject(projectId, name)));
++ipcMain.handle('entry:saveViaSite', wrap((project, options) => saveViaSite(project, options)));
++ipcMain.handle('entry:base', wrap(() => BASE));
 +ipcMain.handle(
 +    'entry:profileUrl',
 +    wrap(() => {
@@ -9406,10 +10343,10 @@ index 0fa6192c..df5277c3 100644
 +    position: relative;
 +}
 diff --git a/src/renderer/components/header.tsx b/src/renderer/components/header.tsx
-index e7ca0a84..054ffdf4 100644
+index e7ca0a84..859bb347 100644
 --- a/src/renderer/components/header.tsx
 +++ b/src/renderer/components/header.tsx
-@@ -12,6 +12,19 @@ import ImportToggleHelper from '../helper/importToggleHelper';
+@@ -12,6 +12,20 @@ import ImportToggleHelper from '../helper/importToggleHelper';
  import { IStoreState } from '../store/modules';
  import { IMapDispatchToProps, IMapStateToProps } from '../store';
  import styled from 'styled-components';
@@ -9424,12 +10361,13 @@ index e7ca0a84..054ffdf4 100644
 +    | 'logout'
 +    | 'entry_logout'
 +    | 'open_drive'
++    | 'open_entry'
 +    | 'drive_web'
 +    | 'entry_profile';
  
  const FoundationLabel = styled.span`
      float: left;
-@@ -33,6 +46,8 @@ interface IProps extends IReduxDispatch, IReduxState {
+@@ -33,6 +47,8 @@ interface IProps extends IReduxDispatch, IReduxState {
      onProgramLanguageChanged: (key: string) => void;
      onLoadProject: () => void;
      onReloadProject: () => void;
@@ -9438,7 +10376,7 @@ index e7ca0a84..054ffdf4 100644
      programLanguageMode: string;
      executionStatus: {
          canRedo: boolean;
-@@ -44,6 +59,16 @@ type DropDownItemPair = [string | ReactElement, string];
+@@ -44,6 +60,16 @@ type DropDownItemPair = [string | ReactElement, string];
  
  class Header extends Component<IProps, IState> {
      dropdownList: any;
@@ -9455,7 +10393,7 @@ index e7ca0a84..054ffdf4 100644
  
      constructor(props: Readonly<IProps>) {
          super(props);
-@@ -63,15 +88,48 @@ class Header extends Component<IProps, IState> {
+@@ -63,15 +89,56 @@ class Header extends Component<IProps, IState> {
      get fileList(): DropDownItemPair[] {
          return [
              [RendererUtils.getLang('Workspace.file_new'), 'new'],
@@ -9469,9 +10407,16 @@ index e7ca0a84..054ffdf4 100644
 -        return [
 -            [RendererUtils.getLang('Workspace.file_save'), 'save'],
 +        const list: DropDownItemPair[] = [[RendererUtils.getLang('Workspace.file_save'), 'save']];
++        // [entry-local] 로그인되어 있으면 저장 위치를 고를 수 있다
++        const entryReady = getCloudState().online && !!getCloudState().entry;
++        if (cloudReady() || entryReady) {
++            list.push(['이 기기에 저장', 'save_local']);
++        }
 +        if (cloudReady()) {
-+            // [entry-local] 로그인되어 있으면 저장 위치를 고를 수 있다
-+            list.push(['이 기기에 저장', 'save_local'], ['구글 드라이브에 저장', 'save_drive']);
++            list.push(['구글 드라이브에 저장', 'save_drive']);
++        }
++        if (entryReady) {
++            list.push(['엔트리 계정에 저장', 'save_entry']);
 +        }
 +        list.push(
              [RendererUtils.getLang('Workspace.file_save_as'), 'save_as'],
@@ -9487,6 +10432,7 @@ index e7ca0a84..054ffdf4 100644
 +        const list: DropDownItemPair[] = [];
 +        if (state.entry) {
 +            list.push(['엔트리 계정 정보', 'entry_profile']);
++            list.push(['엔트리 계정 작품 열기', 'open_entry']);
 +        }
 +        if (state.loggedIn) {
 +            list.push(['구글 드라이브 열기', 'drive_web']);
@@ -9508,7 +10454,7 @@ index e7ca0a84..054ffdf4 100644
      }
  
      get helpList(): DropDownItemPair[] {
-@@ -102,6 +160,17 @@ class Header extends Component<IProps, IState> {
+@@ -102,6 +169,17 @@ class Header extends Component<IProps, IState> {
          ];
      }
  
@@ -9526,7 +10472,7 @@ index e7ca0a84..054ffdf4 100644
      // noti : 가지고 있는 다국어 종류는 4종류이지만, 운영빌드에서는 관리중인 2종류만 제공
      get languageList(): DropDownItemPair[] {
          return [
-@@ -192,6 +261,12 @@ class Header extends Component<IProps, IState> {
+@@ -192,6 +270,12 @@ class Header extends Component<IProps, IState> {
              case 'language':
                  this.handleChangeLanguage(item);
                  break;
@@ -9539,7 +10485,7 @@ index e7ca0a84..054ffdf4 100644
          }
      }
  
-@@ -393,6 +468,67 @@ class Header extends Component<IProps, IState> {
+@@ -393,6 +477,67 @@ class Header extends Component<IProps, IState> {
                          </div>
                      </div>
  
@@ -9608,7 +10554,7 @@ index e7ca0a84..054ffdf4 100644
                      {lang === 'ko' && (
                          <div className={'group_inner'}>
 diff --git a/src/renderer/components/workspace.tsx b/src/renderer/components/workspace.tsx
-index 32eb38dd..96cd79b2 100644
+index 32eb38dd..78d1d265 100644
 --- a/src/renderer/components/workspace.tsx
 +++ b/src/renderer/components/workspace.tsx
 @@ -1,5 +1,5 @@
@@ -9618,7 +10564,7 @@ index 32eb38dd..96cd79b2 100644
  import './workspace.scss';
  import '../resources/styles/fonts.scss';
  import { connect } from 'react-redux';
-@@ -23,6 +23,39 @@ import { IMapDispatchToProps, IMapStateToProps } from '../store';
+@@ -23,6 +23,51 @@ import { IMapDispatchToProps, IMapStateToProps } from '../store';
  import DragAndDropContainer from './DragAndDropContainer';
  import EntryModalHelper from '../helper/entry/entryModalHelper';
  import ipcRendererHelper from '../helper/ipcRendererHelper';
@@ -9648,17 +10594,29 @@ index 32eb38dd..96cd79b2 100644
 +    cloudReady,
 +    entryLogin,
 +    entryLogout,
++    entryApi,
 +    getCloudState,
 +    startCloudState,
 +} from '../helper/cloudState';
 +import { chooseLoginMethod } from '../helper/loginChooser';
++
++/** [entry-local] 알림 (엔트리 화면이 아직 준비 중이면 조용히 넘어간다) */
++function notify(title: string, message: string) {
++    try {
++        if (Entry.toast && Entry.toast.success) {
++            Entry.toast.success(title, message);
++        }
++    } catch (e) {
++        // 알림 실패는 무시
++    }
++}
 +
 +// [entry-local] 내부 저장소 자동 저장 주기 (변경이 있을 때만)
 +const AUTO_SAVE_INTERVAL = 60 * 1000;
  
  interface IProps extends IReduxDispatch, IReduxState {}
  
-@@ -34,6 +67,12 @@ class Workspace extends Component<IProps> {
+@@ -34,6 +79,13 @@ class Workspace extends Component<IProps> {
      private isFirstRender = true;
      private isSavingCanvasData = false;
      private isSaveProject = false;
@@ -9666,12 +10624,13 @@ index 32eb38dd..96cd79b2 100644
 +    private localProjectId?: string;
 +    // [entry-local] 구글 드라이브 파일 id, 그리고 '저장하기'가 저장할 곳
 +    private cloudFileId?: string;
-+    private saveTarget: 'local' | 'drive' = 'local';
++    private saveTarget: 'local' | 'drive' | 'entry' = 'local';
++    private entryProjectId?: string; // [entry-local] 엔트리 계정 작품 id
 +    private autoSaveTimer?: number;
      private defaultInitOption = {
          type: 'workspace',
          backpackDisable: true,
-@@ -60,7 +99,15 @@ class Workspace extends Component<IProps> {
+@@ -60,7 +112,15 @@ class Workspace extends Component<IProps> {
      };
  
      get initOption() {
@@ -9688,7 +10647,7 @@ index 32eb38dd..96cd79b2 100644
      }
  
      constructor(props: Readonly<IProps>) {
-@@ -86,7 +133,9 @@ class Workspace extends Component<IProps> {
+@@ -86,7 +146,9 @@ class Workspace extends Component<IProps> {
      }
  
      componentDidMount() {
@@ -9699,7 +10658,7 @@ index 32eb38dd..96cd79b2 100644
          setTimeout(async () => {
              await this._waitFontLoad();
              try {
-@@ -108,6 +157,12 @@ class Workspace extends Component<IProps> {
+@@ -108,6 +170,12 @@ class Workspace extends Component<IProps> {
          }, 0);
      }
  
@@ -9712,7 +10671,7 @@ index 32eb38dd..96cd79b2 100644
      componentDidUpdate(prevProps: Readonly<IProps>): void {
          if (
              prevProps.common.projectName &&
-@@ -162,6 +217,14 @@ class Workspace extends Component<IProps> {
+@@ -162,6 +230,14 @@ class Workspace extends Component<IProps> {
          addEventListener('saveAsWorkspace', () => {
              this.handleSaveAction('saveAs');
          });
@@ -9727,17 +10686,18 @@ index 32eb38dd..96cd79b2 100644
          addEventListener('saveCanvasImage', (data: any) => {
              this.handleCanvasImageSave(data);
          });
-@@ -373,6 +436,9 @@ class Workspace extends Component<IProps> {
+@@ -373,6 +449,10 @@ class Workspace extends Component<IProps> {
          const project = Entry.exportProject();
          if (project) {
              project.name = this._getProjectName();
 +            project.localProjectId = this.localProjectId;
 +            project.cloudFileId = this.cloudFileId;
++            project.entryProjectId = this.entryProjectId;
 +            project.saveTarget = this.saveTarget;
              Object.assign(project, option);
              LocalStorageManager.saveProject(project);
          }
-@@ -438,78 +504,354 @@ class Workspace extends Component<IProps> {
+@@ -438,78 +518,430 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -9760,9 +10720,15 @@ index 32eb38dd..96cd79b2 100644
 +            await this.saveToDrive({ asNew: !this.cloudFileId });
 +            return;
 +        }
++        if (key === 'save_entry') {
++            await this.saveToEntry();
++            return;
++        }
 +        const driveTarget = this.saveTarget === 'drive' && !!this.cloudFileId;
 +        if (key === 'save') {
-+            if (driveTarget) {
++            if (this.saveTarget === 'entry' && getCloudState().entry) {
++                await this.saveToEntry();
++            } else if (driveTarget) {
 +                await this.saveToDrive({ asNew: false });
 +            } else {
 +                await this.saveToLocalStore({ asNew: !this.localProjectId, silent: false });
@@ -9774,6 +10740,55 @@ index 32eb38dd..96cd79b2 100644
 +            await this.saveToDrive({ asNew: true });
 +        } else {
 +            await this.saveToLocalStore({ asNew: true, silent: false });
++        }
++    };
++
++    /**
++     * [entry-local] 엔트리 계정에 저장 (반자동)
++     * 엔트리 작업 화면을 앱 안 창에 열고 지금 작품 파일을 '오프라인 작품 불러오기'에 자동으로 넣어 준다.
++     * 사용자가 엔트리 화면의 [저장하기]를 누르면 계정에 저장된다.
++     */
++    saveToEntry = async () => {
++        if (this.isSaveProject) {
++            return;
++        }
++        const state = getCloudState();
++        if (!state.online) {
++            EntryModalHelper.getAlertModal('인터넷에 연결되어 있지 않습니다.\n이 기기에 저장한 뒤 나중에 다시 시도해 주세요.');
++            return;
++        }
++        if (!state.entry) {
++            if (!(await EntryModalHelper.getConfirmModal('엔트리 계정에 저장하려면 엔트리 로그인이 필요합니다.\n지금 로그인할까요?'))) {
++                return;
++            }
++            if (!(await this.handleAccountAction('login_entry'))) {
++                return;
++            }
++        }
++        const name = this._getProjectName();
++        // 엔트리 창에 올라가는 사이 바뀐 내용이 없어지지 않도록 이 기기에도 먼저 저장
++        if (this.localProjectId) {
++            await this.saveToLocalStore({ asNew: false, silent: true });
++        }
++        this.isSaveProject = true;
++        try {
++            Entry.engine && !Entry.engine.isState('stop') && Entry.engine.toggleStop();
++            const project = this._exportCurrentProject();
++            const result = await entryApi.saveViaSite(project, { entryProjectId: this.entryProjectId, name });
++            if (result && result.projectId) {
++                this.entryProjectId = result.projectId;
++                this.saveTarget = 'entry';
++            }
++            if (result && result.saved) {
++                notify('엔트리 계정에 저장됨', name);
++            } else {
++                notify('엔트리 계정', '저장하지 않고 엔트리 창을 닫았습니다.');
++            }
++        } catch (err) {
++            console.error(err);
++            EntryModalHelper.getAlertModal(`엔트리 작업 화면을 열지 못했습니다.\n${cloudErrorMessage(err)}`);
++        } finally {
++            this.isSaveProject = false;
 +        }
 +    };
 +
@@ -9834,6 +10849,9 @@ index 32eb38dd..96cd79b2 100644
 +            case 'open_drive':
 +                this.openLocalProjectList('drive');
 +                return true;
++            case 'open_entry':
++                this.openLocalProjectList('entry');
++                return true;
 +            case 'drive_web':
 +            case 'entry_profile':
 +                try {
@@ -9858,7 +10876,7 @@ index 32eb38dd..96cd79b2 100644
 +            case 'login_entry':
 +                try {
 +                    const user = await entryLogin();
-+                    Entry.toast.success('로그인 완료', `${user.nickname || user.username} 님, 엔트리 계정으로 로그인했습니다.`);
++                    notify('로그인 완료', `${user.nickname || user.username} 님, 엔트리 계정으로 로그인했습니다.`);
 +                    return true;
 +                } catch (err) {
 +                    if (!isCancel(err)) {
@@ -9874,7 +10892,7 @@ index 32eb38dd..96cd79b2 100644
 +                    return false;
 +                }
 +                await entryLogout();
-+                Entry.toast.success('로그아웃', '엔트리 계정에서 로그아웃했습니다.');
++                notify('로그아웃', '엔트리 계정에서 로그아웃했습니다.');
 +                return true;
 +            }
 +            case 'logout': {
@@ -9886,15 +10904,15 @@ index 32eb38dd..96cd79b2 100644
 +                if (this.saveTarget === 'drive') {
 +                    this.saveTarget = 'local';
 +                }
-+                Entry.toast.success('로그아웃', '구글 계정에서 로그아웃했습니다.');
++                notify('로그아웃', '구글 계정에서 로그아웃했습니다.');
 +                return true;
 +            }
 +            case 'login_google':
 +            default:
 +                try {
-+                    Entry.toast.success('구글 로그인', '로그인 창에서 계정을 선택해 주세요.');
++                    notify('구글 로그인', '로그인 창에서 계정을 선택해 주세요.');
 +                    const status = await cloudLogin();
-+                    Entry.toast.success('로그인 완료', `${status.email || status.name || ''} 계정으로 로그인했습니다.`);
++                    notify('로그인 완료', `${status.email || status.name || ''} 계정으로 로그인했습니다.`);
 +                    return true;
 +                } catch (err) {
 +                    if (!isCancel(err)) {
@@ -10073,11 +11091,29 @@ index 32eb38dd..96cd79b2 100644
 -        LocalStorageManager.clearSavedProject();
 +    };
 +
-+    openLocalProjectList = (initialTab: 'local' | 'drive' = 'local') => {
++    openLocalProjectList = (initialTab: 'local' | 'drive' | 'entry' = 'local') => {
 +        openLocalProjectModal({
 +            initialTab,
 +            currentId: this.localProjectId,
 +            currentCloudId: this.cloudFileId,
++            currentEntryId: this.entryProjectId,
++            onOpenEntry: async (projectId: string, name: string) => {
++                if (projectId !== this.entryProjectId && !(await EntryUtils.confirmProjectWillDismiss())) {
++                    return;
++                }
++                this.showModalProgress('progress', '엔트리에서 작품을 가져오는 중…', '처음에는 30초쯤 걸릴 수 있습니다.', { width: 280 });
++                try {
++                    const project = await entryApi.load(projectId, name);
++                    project.saveTarget = 'entry';
++                    await this.loadProject(project);
++                    this.hideModalProgress();
++                    notify('엔트리 계정', `'${project.name}' 작품을 가져왔습니다.`);
++                } catch (e) {
++                    console.error(e);
++                    this.hideModalProgress();
++                    EntryModalHelper.getAlertModal(`엔트리 작품을 가져오지 못했습니다.\n${cloudErrorMessage(e)}`);
++                }
++            },
 +            onLogin: () => this.handleAccountAction('login_google'),
 +            onOpenCloud: async (fileId: string) => {
 +                if (fileId !== this.cloudFileId && !(await EntryUtils.confirmProjectWillDismiss())) {
@@ -10144,7 +11180,7 @@ index 32eb38dd..96cd79b2 100644
      };
  
      handleFileAction = async (type: string) => {
-@@ -518,6 +860,10 @@ class Workspace extends Component<IProps> {
+@@ -518,6 +950,10 @@ class Workspace extends Component<IProps> {
                  await RendererUtils.clearTempProject();
                  await this.loadProject();
              }
@@ -10155,15 +11191,16 @@ index 32eb38dd..96cd79b2 100644
          } else if (type === 'open_offline') {
              this._loadProjectFromFile(
                  () =>
-@@ -576,11 +922,30 @@ class Workspace extends Component<IProps> {
+@@ -576,11 +1012,33 @@ class Workspace extends Component<IProps> {
          let projectWorkspaceMode = currentWorkspaceMode;
  
          if (project) {
 +            // [entry-local] 내부 저장소 작품이면 id 유지, 외부 .ent 를 연 경우엔 저장 시 새 작품으로 들어간다.
 +            this.localProjectId = project.localProjectId || undefined;
 +            this.cloudFileId = project.cloudFileId || undefined;
++            this.entryProjectId = project.entryProjectId || undefined;
 +            this.saveTarget =
-+                project.saveTarget === 'drive' || project.saveTarget === 'local'
++                project.saveTarget === 'drive' || project.saveTarget === 'local' || project.saveTarget === 'entry'
 +                    ? project.saveTarget
 +                    : this.cloudFileId && !this.localProjectId
 +                    ? 'drive'
@@ -10173,6 +11210,7 @@ index 32eb38dd..96cd79b2 100644
 +            }
 +            delete project.localProjectId;
 +            delete project.cloudFileId;
++            delete project.entryProjectId;
 +            delete project.saveTarget;
 +            localizeProject(project);
              this.projectSavedPath = project.savedPath || '';
@@ -10182,11 +11220,12 @@ index 32eb38dd..96cd79b2 100644
          } else {
 +            delete this.localProjectId;
 +            delete this.cloudFileId;
++            delete this.entryProjectId;
 +            this.saveTarget = 'local';
              delete this.projectSavedPath;
              delete this.projectParent;
              CommonActions.changeProjectName(RendererUtils.getDefaultProjectName());
-@@ -602,8 +967,14 @@ class Workspace extends Component<IProps> {
+@@ -602,8 +1060,14 @@ class Workspace extends Component<IProps> {
          }
          Entry.reloadBlock();
          this.isFirstRender = false;
@@ -10201,7 +11240,7 @@ index 32eb38dd..96cd79b2 100644
          try {
              if (project) {
                  await Entry.loadExternalModules(project);
-@@ -633,9 +1004,36 @@ class Workspace extends Component<IProps> {
+@@ -633,9 +1097,38 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -10220,6 +11259,7 @@ index 32eb38dd..96cd79b2 100644
 +        project.name = this._getProjectName();
 +        project.localProjectId = this.localProjectId;
 +        project.cloudFileId = this.cloudFileId;
++        project.entryProjectId = this.entryProjectId;
 +        project.saveTarget = this.saveTarget;
 +        project.parent = this.projectParent;
 +        if (key === 'fastEngine') {
@@ -10234,11 +11274,12 @@ index 32eb38dd..96cd79b2 100644
          project.name = this._getProjectName();
 +        project.localProjectId = this.localProjectId; // [entry-local] 언어·모드 변경 후에도 같은 작품으로 유지
 +        project.cloudFileId = this.cloudFileId;
++        project.entryProjectId = this.entryProjectId;
 +        project.saveTarget = this.saveTarget;
          await this.loadProject(project);
      };
  
-@@ -717,6 +1115,8 @@ class Workspace extends Component<IProps> {
+@@ -717,6 +1210,8 @@ class Workspace extends Component<IProps> {
                          onFileAction={this.handleFileAction}
                          onReloadProject={this.reloadProject}
                          onLoadProject={this.loadProject}
@@ -10249,10 +11290,10 @@ index 32eb38dd..96cd79b2 100644
                          executionStatus={executionStatus}
 diff --git a/src/renderer/helper/cloudState.ts b/src/renderer/helper/cloudState.ts
 new file mode 100644
-index 00000000..46aa503e
+index 00000000..833bf0d3
 --- /dev/null
 +++ b/src/renderer/helper/cloudState.ts
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,198 @@
 +/**
 + * [entry-local] 구글 드라이브·엔트리 계정 로그인 상태 + 인터넷 연결 상태
 + * 상단 메뉴·내 작품 창·저장 메뉴가 같이 쓴다.
@@ -10315,6 +11356,10 @@ index 00000000..46aa503e
 +    return '';
 +}
 +
++// 구글 설정이 빠진 빌드면 예전에 로그인한 기록이 있어도 로그아웃 상태로 본다
++const cloudPatch = (status: CloudStatus): Partial<CloudState> =>
++    status ? { ...status, loggedIn: !!(status.configured && status.loggedIn) } : {};
++
 +const setEntry = (status?: EntryStatus) => set({ entry: status && status.loggedIn ? status.user : undefined });
 +
 +export function subscribeCloud(fn: Listener) {
@@ -10338,7 +11383,7 @@ index 00000000..46aa503e
 +    });
 +    window.addEventListener('offline', () => set({ online: false }));
 +    if (window.ipcListen) {
-+        window.ipcListen('cloud:status', (_event: any, status: CloudStatus) => set({ ...status }));
++        window.ipcListen('cloud:status', (_event: any, status: CloudStatus) => set(cloudPatch(status)));
 +        window.ipcListen('entry:status', (_event: any, status: EntryStatus) => setEntry(status));
 +    }
 +    window
@@ -10349,7 +11394,7 @@ index 00000000..46aa503e
 +    setTimeout(entryVerify, 4000);
 +    window
 +        .ipcInvoke<CloudStatus>('cloud:status')
-+        .then((status) => status && set({ ...status }))
++        .then((status) => status && set(cloudPatch(status)))
 +        .catch(() => undefined);
 +}
 +
@@ -10358,7 +11403,7 @@ index 00000000..46aa503e
 +    try {
 +        await window.ipcInvoke('cloud:login');
 +        const status = await window.ipcInvoke<CloudStatus>('cloud:status');
-+        set({ ...status });
++        set(cloudPatch(status));
 +        return status;
 +    } finally {
 +        set({ busy: false });
@@ -10368,7 +11413,7 @@ index 00000000..46aa503e
 +export async function cloudLogout() {
 +    await window.ipcInvoke('cloud:logout');
 +    const status = await window.ipcInvoke<CloudStatus>('cloud:status');
-+    set({ ...status });
++    set(cloudPatch(status));
 +}
 +
 +function entryVerify() {
@@ -10396,6 +11441,17 @@ index 00000000..46aa503e
 +    await window.ipcInvoke('entry:logout');
 +    setEntry({ loggedIn: false });
 +}
++
++export type EntryProjectMeta = { id: string; name: string; thumb?: string; created?: string; updated?: string; isopen?: boolean };
++
++export const entryApi = {
++    base: () => window.ipcInvoke<string>('entry:base'),
++    projects: (start = 0, display = 60) =>
++        window.ipcInvoke<{ total: number; list: EntryProjectMeta[] }>('entry:projects', start, display),
++    load: (projectId: string, name: string) => window.ipcInvoke<any>('entry:load', projectId, name),
++    saveViaSite: (project: any, options: { entryProjectId?: string; name: string }) =>
++        window.ipcInvoke<{ projectId?: string; saved?: boolean }>('entry:saveViaSite', project, options),
++};
 +
 +export const accountApi = {
 +    driveFolderUrl: () => window.ipcInvoke<string>('cloud:folderUrl'),
@@ -10712,6 +11768,19 @@ index 00000000..977846cd
 +        });
 +    };
 +}
+diff --git a/src/renderer/helper/entry/entryUtils.ts b/src/renderer/helper/entry/entryUtils.ts
+index d0366f68..3d823f87 100644
+--- a/src/renderer/helper/entry/entryUtils.ts
++++ b/src/renderer/helper/entry/entryUtils.ts
+@@ -18,7 +18,7 @@ export default class {
+      */
+     static async confirmProjectWillDismiss() {
+         let confirmProjectDismiss = true;
+-        if (!Entry.stateManager.isSaved()) {
++        if (Entry.stateManager && !Entry.stateManager.isSaved()) { // [entry-local] 작품을 다시 불러오는 중에도 오류 없이
+             confirmProjectDismiss = await EntryModalHelper.getConfirmModal(
+                 RendererUtils.getLang('Menus.save_dismiss')
+             );
 diff --git a/src/renderer/helper/entry/fastMath.ts b/src/renderer/helper/entry/fastMath.ts
 new file mode 100644
 index 00000000..af572b2e
@@ -11215,15 +12284,20 @@ index fbdd0052..13ba8c1d 100644
      }
 diff --git a/src/renderer/helper/localProjectModal.ts b/src/renderer/helper/localProjectModal.ts
 new file mode 100644
-index 00000000..70d99e79
+index 00000000..3108ac84
 --- /dev/null
 +++ b/src/renderer/helper/localProjectModal.ts
-@@ -0,0 +1,512 @@
+@@ -0,0 +1,637 @@
 +import IpcRendererHelper from './ipcRendererHelper';
 +import RendererUtils from './rendererUtils';
 +import EntryModalHelper from './entry/entryModalHelper';
++import { entryProjectPageUrl, entryThumbUrl } from '../../common/entryAccount';
++import { ENTRY_LOCAL_BUILD } from '../../common/buildInfo';
 +import {
 +    CloudFileMeta,
++    EntryProjectMeta,
++    accountApi,
++    entryApi,
 +    cloudApi,
 +    cloudAvailable,
 +    cloudErrorMessage,
@@ -11235,10 +12309,12 @@ index 00000000..70d99e79
 + * [entry-local] '내 작품' 목록 창
 + *  - 이 기기     : 내부 저장소의 작품 (열기 / 이름 / 복사 / 내보내기 / 삭제)
 + *  - 구글 드라이브: 로그인했을 때 '엔트리 로컬' 폴더의 작품 (열기 / 이름 / 내보내기 / 삭제=휴지통)
-+ * 구글 드라이브 탭은 인터넷이 연결되어 있고 구글 설정이 들어 있는 빌드에서만 보인다.
++ *  - 엔트리 계정 : 엔트리에 로그인했을 때 계정의 작품 (열기 / 엔트리에서 보기)
++ * 구글 드라이브 탭은 인터넷이 연결되어 있고 구글 설정이 들어 있는 빌드에서만,
++ * 엔트리 계정 탭은 인터넷이 연결되어 있고 엔트리에 로그인했을 때만 보인다.
 + */
 +
-+type Tab = 'local' | 'drive';
++type Tab = 'local' | 'drive' | 'entry';
 +
 +type Options = {
 +    initialTab?: Tab;
@@ -11251,7 +12327,11 @@ index 00000000..70d99e79
 +    onCloudRenamed?: (fileId: string, name: string) => void;
 +    onCloudRemoved?: (fileId: string) => void;
 +    onLogin?: () => Promise<boolean>;
++    currentEntryId?: string;
++    onOpenEntry?: (projectId: string, name: string) => void | Promise<void>;
 +};
++
++const entryTabAvailable = () => getCloudState().online && !!getCloudState().entry;
 +
 +const ROOT_ID = 'entry-local-projects';
 +
@@ -11286,7 +12366,9 @@ index 00000000..70d99e79
 +  background: #fff; border-radius: 6px; cursor: pointer; color: #2c313d; }
 +#${ROOT_ID} .elp-actions button.primary { background: #4f80ff; border-color: #4f80ff; color: #fff; }
 +#${ROOT_ID} .elp-actions button.danger { color: #e0473e; }
-+#${ROOT_ID} .elp-foot { padding: 10px 20px; border-top: 1px solid #e5e5e5; font-size: 12px; color: #888; }
++#${ROOT_ID} .elp-foot { padding: 10px 20px; border-top: 1px solid #e5e5e5; font-size: 12px; color: #888; display: flex; gap: 12px; }
++#${ROOT_ID} .elp-foot-text { flex: 1; min-width: 0; }
++#${ROOT_ID} .elp-build { flex: none; color: #b0b5bf; }
 +`;
 +
 +function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] {
@@ -11363,7 +12445,8 @@ index 00000000..70d99e79
 +    const tabs = el('div', 'elp-tabs');
 +    const tabLocal = el('button', 'elp-tab', '이 기기');
 +    const tabDrive = el('button', 'elp-tab', '구글 드라이브');
-+    tabs.append(tabLocal, tabDrive);
++    const tabEntry = el('button', 'elp-tab', '엔트리 계정');
++    tabs.append(tabLocal, tabDrive, tabEntry);
 +    const search = el('input');
 +    search.placeholder = '작품 이름 검색';
 +    const close = el('button', 'elp-close', '×');
@@ -11372,11 +12455,23 @@ index 00000000..70d99e79
 +
 +    const body = el('div', 'elp-body');
 +    const foot = el('div', 'elp-foot');
++    const footText = el('span', 'elp-foot-text');
++    foot.append(footText, el('span', 'elp-build', `버전 ${ENTRY_LOCAL_BUILD}`));
 +    box.append(head, body, foot);
 +    root.appendChild(box);
 +    document.body.appendChild(root);
 +
-+    let tab: Tab = options.initialTab === 'drive' && cloudAvailable() ? 'drive' : 'local';
++    let tab: Tab =
++        options.initialTab === 'drive' && cloudAvailable()
++            ? 'drive'
++            : options.initialTab === 'entry' && entryTabAvailable()
++            ? 'entry'
++            : 'local';
++    let entryItems: EntryProjectMeta[] | undefined;
++    let entryTotal = 0;
++    let entryError = '';
++    let entryLoading = false;
++    let entryBase = 'https://playentry.org';
 +    let localItems: LocalProjectMeta[] = [];
 +    let driveItems: CloudFileMeta[] | undefined;
 +    let driveError = '';
@@ -11390,8 +12485,11 @@ index 00000000..70d99e79
 +        }
 +    };
 +    const unsubscribe = subscribeCloud(() => {
-+        if (!cloudAvailable() && tab === 'drive') {
++        if ((!cloudAvailable() && tab === 'drive') || (!entryTabAvailable() && tab === 'entry')) {
 +            tab = 'local';
++        }
++        if (!getCloudState().entry) {
++            entryItems = undefined;
 +        }
 +        updateTabs();
 +        render();
@@ -11410,13 +12508,20 @@ index 00000000..70d99e79
 +    });
 +
 +    const updateTabs = () => {
-+        tabs.style.visibility = cloudAvailable() ? 'visible' : 'hidden';
++        tabs.style.visibility = cloudAvailable() || entryTabAvailable() ? 'visible' : 'hidden';
++        tabDrive.style.display = cloudAvailable() ? '' : 'none';
++        tabEntry.style.display = entryTabAvailable() ? '' : 'none';
 +        tabLocal.className = `elp-tab${tab === 'local' ? ' on' : ''}`;
 +        tabDrive.className = `elp-tab${tab === 'drive' ? ' on' : ''}`;
++        tabEntry.className = `elp-tab${tab === 'entry' ? ' on' : ''}`;
 +        const state = getCloudState();
-+        foot.textContent =
++        footText.textContent =
 +            tab === 'local'
 +                ? `저장 위치: ${localDir}`
++                : tab === 'entry'
++                ? `${(state.entry && (state.entry.nickname || state.entry.username)) || ''} · 엔트리 계정 작품${
++                      entryItems ? ` ${entryTotal}개` : ''
++                  } (열면 이 앱으로 가져옵니다. 계정에 저장은 저장 메뉴의 [엔트리 계정에 저장])`
 +                : state.loggedIn
 +                ? `${state.email || state.name || ''} · 내 드라이브 / 엔트리 로컬 폴더 (삭제한 작품은 드라이브 휴지통에서 30일 동안 복구할 수 있습니다)`
 +                : '구글 계정으로 로그인하면 작품을 구글 드라이브에 저장하고 다른 기기에서도 열 수 있습니다.';
@@ -11536,9 +12641,10 @@ index 00000000..70d99e79
 +                        '삭제',
 +                        'danger',
 +                        async () => {
++                            // 엔트리 확인 창은 (본문, 제목) 순서
 +                            const ok = await EntryModalHelper.getConfirmModal(
-+                                '작품 삭제',
-+                                `'${meta.name}' 작품을 삭제할까요?\n삭제하면 되돌릴 수 없습니다.`
++                                `'${meta.name}' 작품을 삭제할까요?\n삭제하면 되돌릴 수 없습니다.`,
++                                '작품 삭제'
 +                            );
 +                            if (!ok) {
 +                                return;
@@ -11634,8 +12740,8 @@ index 00000000..70d99e79
 +                        'danger',
 +                        async () => {
 +                            const ok = await EntryModalHelper.getConfirmModal(
-+                                '작품 삭제',
-+                                `'${file.name}' 작품을 구글 드라이브 휴지통으로 옮길까요?\n드라이브 휴지통에서 30일 동안 복구할 수 있습니다.`
++                                `'${file.name}' 작품을 구글 드라이브 휴지통으로 옮길까요?\n드라이브 휴지통에서 30일 동안 복구할 수 있습니다.`,
++                                '작품 삭제'
 +                            );
 +                            if (!ok) {
 +                                return;
@@ -11668,9 +12774,90 @@ index 00000000..70d99e79
 +        });
 +    };
 +
++    /* ---------- 엔트리 계정 ---------- */
++    const renderEntry = () => {
++        if (entryLoading && !entryItems) {
++            empty('엔트리에서 작품 목록을 불러오는 중…');
++            return;
++        }
++        if (entryError) {
++            empty(`목록을 불러오지 못했습니다.\n${entryError}`, { label: '다시 시도', onClick: () => reloadEntry() });
++            return;
++        }
++        const items = entryItems || [];
++        const filtered = filter(items);
++        if (filtered.length === 0) {
++            empty(
++                items.length === 0
++                    ? '엔트리 계정에 작품이 없습니다.\n저장 메뉴의 [엔트리 계정에 저장]으로 이 작품을 올릴 수 있습니다.'
++                    : '검색 결과가 없습니다.'
++            );
++            return;
++        }
++        filtered.forEach((project) => {
++            const open = async () => {
++                dispose();
++                options.onOpenEntry && (await options.onOpenEntry(project.id, project.name));
++            };
++            const time = Date.parse(project.updated || project.created || '') || 0;
++            card({
++                name: `${project.name}${project.isopen === false ? ' (비공개)' : ''}`,
++                time,
++                current: project.id === options.currentEntryId,
++                thumbnail: entryThumbUrl(project.thumb, entryBase),
++                onOpen: open,
++                onRename: () => undefined,
++                actions: [
++                    ['열기', 'primary', open],
++                    [
++                        '엔트리에서 보기',
++                        undefined,
++                        () => {
++                            accountApi.openExternal(entryProjectPageUrl(project.id)).catch((e) =>
++                                EntryModalHelper.getAlertModal(`페이지를 열지 못했습니다.\n${cloudErrorMessage(e)}`)
++                            );
++                        },
++                    ],
++                ],
++            });
++        });
++        if (!search.value.trim() && items.length < entryTotal) {
++            empty(`${items.length} / ${entryTotal}개`, { label: entryLoading ? '불러오는 중…' : '더 보기', onClick: () => reloadEntry(true) });
++        }
++    };
++
++    const reloadEntry = async (more = false) => {
++        if (!getCloudState().entry || entryLoading) {
++            render();
++            return;
++        }
++        entryLoading = true;
++        entryError = '';
++        if (!more) {
++            entryItems = undefined;
++        }
++        render();
++        try {
++            entryBase = (await entryApi.base()) || entryBase;
++            const page = await entryApi.projects(more && entryItems ? entryItems.length : 0, 60);
++            entryTotal = page.total || 0;
++            entryItems = more && entryItems ? entryItems.concat(page.list) : page.list;
++        } catch (e) {
++            entryError = cloudErrorMessage(e);
++        } finally {
++            entryLoading = false;
++            updateTabs();
++            if (tab === 'entry') {
++                render();
++            }
++        }
++    };
++
 +    const render = () => {
 +        body.innerHTML = '';
-+        if (tab === 'drive') {
++        if (tab === 'entry') {
++            renderEntry();
++        } else if (tab === 'drive') {
 +            renderDrive();
 +        } else {
 +            renderLocal();
@@ -11712,9 +12899,13 @@ index 00000000..70d99e79
 +        if (next === 'drive' && !driveItems && !driveLoading) {
 +            reloadDrive();
 +        }
++        if (next === 'entry' && !entryItems && !entryLoading) {
++            reloadEntry();
++        }
 +    };
 +    tabLocal.onclick = () => switchTab('local');
 +    tabDrive.onclick = () => switchTab('drive');
++    tabEntry.onclick = () => switchTab('entry');
 +    search.oninput = render;
 +    search.onkeydown = (e) => e.stopPropagation();
 +
@@ -11729,14 +12920,17 @@ index 00000000..70d99e79
 +    if (tab === 'drive') {
 +        reloadDrive();
 +    }
++    if (tab === 'entry') {
++        reloadEntry();
++    }
 +    search.focus();
 +}
 diff --git a/src/renderer/helper/loginChooser.ts b/src/renderer/helper/loginChooser.ts
 new file mode 100644
-index 00000000..496bc9d6
+index 00000000..eeaef748
 --- /dev/null
 +++ b/src/renderer/helper/loginChooser.ts
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,209 @@
 +/**
 + * [entry-local] 로그인 방법 선택 창: 구글 계정 / 엔트리(네이버 계열)
 + * 고르면 'google' | 'entry', 닫으면 null.
@@ -11854,6 +13048,96 @@ index 00000000..496bc9d6
 +        if (first[0]) {
 +            first[0].focus();
 +        }
++    });
++}
++
++/* ------------------------------------------------------------------ */
++/* 안내 창: 제목 + 번호 매긴 단계 + [취소] [확인]  → true / false        */
++/* ------------------------------------------------------------------ */
++const GUIDE_CSS = `
++.elg-box { width: min(480px, calc(100vw - 32px)); }
++.elg-intro { margin: 0 0 16px; font-size: 14px; color: #555; text-align: center; line-height: 1.6; }
++.elg-steps { list-style: none; margin: 0 0 20px; padding: 0; }
++.elg-step { display: flex; gap: 12px; align-items: flex-start; padding: 10px 0; border-top: 1px solid #eef0f3; }
++.elg-step:first-child { border-top: 0; }
++.elg-num { flex: none; width: 26px; height: 26px; border-radius: 50%; background: #4f80ff; color: #fff;
++  font-size: 14px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
++.elg-head { display: block; font-size: 15px; font-weight: 700; color: #222; }
++.elg-text { display: block; margin-top: 3px; font-size: 13px; color: #777; line-height: 1.5; }
++.elg-buttons { display: flex; gap: 10px; }
++.elg-buttons button { flex: 1; padding: 12px 0; border-radius: 8px; font: inherit; font-size: 15px; cursor: pointer; }
++.elg-cancel { border: 1px solid #4f80ff; background: #fff; color: #4f80ff; }
++.elg-ok { border: 1px solid #4f80ff; background: #4f80ff; color: #fff; font-weight: 700; }
++`;
++
++export function showGuideDialog(options: {
++    title: string;
++    intro?: string;
++    steps: [string, string][];
++    okLabel?: string;
++    cancelLabel?: string;
++}): Promise<boolean> {
++    ensureStyle();
++    if (!document.getElementById(`${STYLE_ID}-guide`)) {
++        const style = document.createElement('style');
++        style.id = `${STYLE_ID}-guide`;
++        style.textContent = GUIDE_CSS;
++        document.head.appendChild(style);
++    }
++    return new Promise((resolve) => {
++        const backdrop = el('div', 'elc-backdrop');
++        const box = el('div', 'elc-box elg-box');
++        box.setAttribute('role', 'dialog');
++        box.setAttribute('aria-modal', 'true');
++        box.setAttribute('aria-label', options.title);
++        box.appendChild(el('h2', 'elc-title', options.title));
++        if (options.intro) {
++            box.appendChild(el('p', 'elg-intro', options.intro));
++        }
++        const list = el('ol', 'elg-steps');
++        options.steps.forEach(([head, text], i) => {
++            const item = el('li', 'elg-step');
++            item.appendChild(el('span', 'elg-num', String(i + 1)));
++            const body = el('span', '');
++            body.appendChild(el('span', 'elg-head', head));
++            if (text) {
++                body.appendChild(el('span', 'elg-text', text));
++            }
++            item.appendChild(body);
++            list.appendChild(item);
++        });
++        box.appendChild(list);
++
++        const buttons = el('div', 'elg-buttons');
++        const cancel = el('button', 'elg-cancel', options.cancelLabel || '취소');
++        const ok = el('button', 'elg-ok', options.okLabel || '확인');
++        cancel.type = 'button';
++        ok.type = 'button';
++        buttons.append(cancel, ok);
++        box.appendChild(buttons);
++
++        const close = (value: boolean) => {
++            document.removeEventListener('keydown', onKey, true);
++            backdrop.remove();
++            resolve(value);
++        };
++        const onKey = (e: KeyboardEvent) => {
++            if (e.key === 'Escape') {
++                e.stopPropagation();
++                close(false);
++            }
++        };
++        cancel.addEventListener('click', () => close(false));
++        ok.addEventListener('click', () => close(true));
++        backdrop.addEventListener('mousedown', (e) => {
++            if (e.target === backdrop) {
++                close(false);
++            }
++        });
++        document.addEventListener('keydown', onKey, true);
++        backdrop.appendChild(box);
++        document.body.appendChild(backdrop);
++        ok.focus();
 +    });
 +}
 diff --git a/src/renderer/renderEntry.tsx b/src/renderer/renderEntry.tsx
@@ -12198,12 +13482,26 @@ index 00000000..fe27e100
 +}
 diff --git a/src/web/entryAccountWeb.ts b/src/web/entryAccountWeb.ts
 new file mode 100644
-index 00000000..d5a0855d
+index 00000000..432d84af
 --- /dev/null
 +++ b/src/web/entryAccountWeb.ts
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,185 @@
 +import { registerPlugin } from '@capacitor/core';
-+import { EntryStatus, EntryUser, ENTRY_HOME_URL, entryProfileUrl, isAllowedExternalUrl, normalizeEntryUser } from '../common/entryAccount';
++import {
++    EntryStatus,
++    EntryUser,
++    ENTRY_HOME_URL,
++    ENTRY_ORIGIN,
++    SAVE_VIA_SITE_HELP,
++    AUTO_SAVE_TEXT,
++    autoSaveProbeScript,
++    entryProfileUrl,
++    entryWorkspaceUrl,
++    exportProjectScript,
++    isAllowedExternalUrl,
++    listProjectsScript,
++    normalizeEntryUser,
++} from '../common/entryAccount';
 +import { isNative } from './platform';
 +import { emit } from './bus';
 +
@@ -12217,6 +13515,17 @@ index 00000000..d5a0855d
 +    check(): Promise<{ user?: EntryUser | null; error?: string }>;
 +    logout(): Promise<void>;
 +    openUrl(options: { url: string }): Promise<void>;
++    run(options: { url: string; script: string; timeoutMs?: number }): Promise<{ json: string }>;
++    openWorkspace(options: {
++        url: string;
++        ent: string;
++        fileName: string;
++        help: string;
++        projectId?: string;
++        probe?: string;
++        probeMenu?: string;
++        texts?: { [key: string]: string };
++    }): Promise<{ projectId?: string; saved?: boolean }>;
 +}
 +
 +const EntryAccount = registerPlugin<EntryAccountPlugin>('EntryAccount');
@@ -12301,6 +13610,66 @@ index 00000000..d5a0855d
 +    } else {
 +        window.open(url, '_blank', 'noopener');
 +    }
++}
++
++/* ---------------- 엔트리 계정 작품 ---------------- */
++function requireUser(): EntryUser {
++    if (!isNative()) {
++        throw new Error('엔트리 계정 기능은 설치한 앱(안드로이드·Windows)에서만 됩니다.');
++    }
++    if (!user) {
++        throw new Error('엔트리 계정으로 로그인해 주세요.');
++    }
++    return user;
++}
++
++async function run<T>(url: string, script: string, timeoutMs?: number): Promise<T> {
++    try {
++        const res = await EntryAccount.run({ url, script, timeoutMs });
++        return JSON.parse(res.json) as T;
++    } catch (e) {
++        if ((e as any) && (e as any).code === 'SIGNED_OUT') {
++            save(undefined);
++        }
++        throw e;
++    }
++}
++
++export function entryListProjects(start = 0, display = 60) {
++    const me = requireUser();
++    return run<{ total: number; list: any[] }>(`${ENTRY_ORIGIN}/`, listProjectsScript(me.id, start, display), 30000);
++}
++
++/** 계정 작품을 .ent 로 받아 온다 → { name, bytes } */
++export async function entryDownloadProject(projectId: string, name: string) {
++    requireUser();
++    const r = await run<{ name: string; base64: string }>(entryWorkspaceUrl(projectId), exportProjectScript(name || '엔트리 작품'));
++    const bin = atob(r.base64);
++    const bytes = new Uint8Array(bin.length);
++    for (let i = 0; i < bin.length; i++) {
++        bytes[i] = bin.charCodeAt(i);
++    }
++    return { name: r.name, bytes };
++}
++
++/** 반자동 저장 창 (엔트리 작업 화면 + 파일 선택 자동 입력) */
++export async function entrySaveViaSite(bytes: Uint8Array, options: { entryProjectId?: string; name: string }) {
++    requireUser();
++    let bin = '';
++    for (let i = 0; i < bytes.length; i += 0x8000) {
++        bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
++    }
++    const res = await EntryAccount.openWorkspace({
++        url: entryWorkspaceUrl(options.entryProjectId),
++        ent: btoa(bin),
++        fileName: 'entry-local-project.ent', // 영문 이름 (작품 이름은 .ent 안에 들어 있음)
++        help: SAVE_VIA_SITE_HELP,
++        projectId: options.entryProjectId,
++        probe: autoSaveProbeScript(false),
++        probeMenu: autoSaveProbeScript(true),
++        texts: AUTO_SAVE_TEXT,
++    });
++    return { projectId: (res && res.projectId) || options.entryProjectId || undefined, saved: !!(res && res.saved) };
 +}
 diff --git a/src/web/media.ts b/src/web/media.ts
 new file mode 100644
@@ -13372,10 +14741,10 @@ index 00000000..9bd437ca
 +}
 diff --git a/src/web/webMain.ts b/src/web/webMain.ts
 new file mode 100644
-index 00000000..d8e79326
+index 00000000..38fb43e6
 --- /dev/null
 +++ b/src/web/webMain.ts
-@@ -0,0 +1,940 @@
+@@ -0,0 +1,964 @@
 +import XLSX from 'xlsx';
 +import { vfs, join, basename, extname, normalize } from './vfs';
 +import { packTarGz, unpackTarGz, TarEntry } from './tar';
@@ -13394,7 +14763,17 @@ index 00000000..d8e79326
 +    loadImage,
 +} from './media';
 +import { cloudStatus, cloudLogin, cloudLogout, driveClient } from './cloudWeb';
-+import { entryStatus, entryLogin, entryLogout, entryVerify, entryProfile, openExternal } from './entryAccountWeb';
++import {
++    entryStatus,
++    entryLogin,
++    entryLogout,
++    entryVerify,
++    entryProfile,
++    openExternal,
++    entryListProjects,
++    entryDownloadProject,
++    entrySaveViaSite,
++} from './entryAccountWeb';
 +import {
 +    PICK,
 +    readPicked,
@@ -14286,6 +15665,20 @@ index 00000000..d8e79326
 +    'entry:logout': () => entryLogout(),
 +    'entry:profileUrl': () => entryProfile(),
 +    'app:openExternal': (url: string) => openExternal(url),
++    'entry:base': () => 'https://playentry.org',
++    'entry:projects': (start: number, display: number) => entryListProjects(start, display),
++    'entry:load': (projectId: string, name: string) =>
++        serialize(async () => {
++            const { name: realName, bytes } = await entryDownloadProject(projectId, name);
++            const project = await loadProjectBytes(bytes, `entry:${projectId}`);
++            project.entryProjectId = projectId;
++            project.name = realName || name || project.name;
++            delete project.savedPath;
++            delete project.cloudFileId;
++            return project;
++        }),
++    'entry:saveViaSite': async (project: any, options: { entryProjectId?: string; name: string }) =>
++        entrySaveViaSite(await serialize(() => packProject(project)), options),
 +});
 +
 +/** Electron IPC 는 인자를 복제해서 넘긴다. 같은 동작을 해야 렌더러 객체가 바뀌지 않는다. */
