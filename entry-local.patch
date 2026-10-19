@@ -10189,7 +10189,7 @@ index e7ca0a84..859bb347 100644
                      {lang === 'ko' && (
                          <div className={'group_inner'}>
 diff --git a/src/renderer/components/workspace.tsx b/src/renderer/components/workspace.tsx
-index 32eb38dd..bb70ffce 100644
+index 32eb38dd..815edaba 100644
 --- a/src/renderer/components/workspace.tsx
 +++ b/src/renderer/components/workspace.tsx
 @@ -1,5 +1,5 @@
@@ -10233,7 +10233,7 @@ index 32eb38dd..bb70ffce 100644
 +    getCloudState,
 +    startCloudState,
 +} from '../helper/cloudState';
-+import { chooseLoginMethod } from '../helper/loginChooser';
++import { chooseLoginMethod, showGuideDialog } from '../helper/loginChooser';
 +
 +/** [entry-local] 알림 (엔트리 화면이 아직 준비 중이면 조용히 넘어간다) */
 +function notify(title: string, message: string) {
@@ -10332,7 +10332,7 @@ index 32eb38dd..bb70ffce 100644
              Object.assign(project, option);
              LocalStorageManager.saveProject(project);
          }
-@@ -438,78 +518,437 @@ class Workspace extends Component<IProps> {
+@@ -438,78 +518,442 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -10401,13 +10401,18 @@ index 32eb38dd..bb70ffce 100644
 +            }
 +        }
 +        const name = this._getProjectName();
-+        const confirmed = await EntryModalHelper.getConfirmModal(
-+            '엔트리 계정에 저장',
-+            `엔트리 작업 화면이 열립니다.\n\n1. 엔트리 화면의 [파일] 메뉴에서 [오프라인 작품 불러오기]를 누르세요.\n   (지금 작품 파일이 자동으로 선택됩니다)\n2. 작품이 열리면 [저장하기]를 누르세요.\n3. 저장이 끝나면 창을 닫으세요.${
-+                this.entryProjectId ? '\n\n엔트리에서 가져온 작품이라 원래 작품 화면으로 열립니다.' : ''
-+            }`
-+        );
-+        if (!confirmed) {
++        const confirmed = await showGuideDialog({
++            title: '엔트리 계정에 저장',
++            intro: this.entryProjectId
++                ? '엔트리 작업 화면이 원래 작품으로 열립니다. 아래 순서대로 해 주세요.'
++                : '엔트리 작업 화면이 열립니다. 아래 순서대로 해 주세요.',
++            steps: [
++                ['[파일] → [오프라인 작품 불러오기]', '엔트리 화면 왼쪽 위 메뉴에서 누르면 지금 작품 파일이 자동으로 들어갑니다.'],
++                ['[저장하기]', '작품이 열리면 엔트리의 저장하기를 누르세요.'],
++                ['창 닫기', '저장이 끝나면 위쪽의 [닫기]를 누르세요.'],
++            ],
++            okLabel: '엔트리 화면 열기',
++        });        if (!confirmed) {
 +            return;
 +        }
 +        // 엔트리 창에 올라가는 사이 바뀐 내용이 없어지지 않도록 이 기기에도 먼저 저장
@@ -10822,7 +10827,7 @@ index 32eb38dd..bb70ffce 100644
      };
  
      handleFileAction = async (type: string) => {
-@@ -518,6 +957,10 @@ class Workspace extends Component<IProps> {
+@@ -518,6 +962,10 @@ class Workspace extends Component<IProps> {
                  await RendererUtils.clearTempProject();
                  await this.loadProject();
              }
@@ -10833,7 +10838,7 @@ index 32eb38dd..bb70ffce 100644
          } else if (type === 'open_offline') {
              this._loadProjectFromFile(
                  () =>
-@@ -576,11 +1019,33 @@ class Workspace extends Component<IProps> {
+@@ -576,11 +1024,33 @@ class Workspace extends Component<IProps> {
          let projectWorkspaceMode = currentWorkspaceMode;
  
          if (project) {
@@ -10867,7 +10872,7 @@ index 32eb38dd..bb70ffce 100644
              delete this.projectSavedPath;
              delete this.projectParent;
              CommonActions.changeProjectName(RendererUtils.getDefaultProjectName());
-@@ -602,8 +1067,14 @@ class Workspace extends Component<IProps> {
+@@ -602,8 +1072,14 @@ class Workspace extends Component<IProps> {
          }
          Entry.reloadBlock();
          this.isFirstRender = false;
@@ -10882,7 +10887,7 @@ index 32eb38dd..bb70ffce 100644
          try {
              if (project) {
                  await Entry.loadExternalModules(project);
-@@ -633,9 +1104,38 @@ class Workspace extends Component<IProps> {
+@@ -633,9 +1109,38 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -10921,7 +10926,7 @@ index 32eb38dd..bb70ffce 100644
          await this.loadProject(project);
      };
  
-@@ -717,6 +1217,8 @@ class Workspace extends Component<IProps> {
+@@ -717,6 +1222,8 @@ class Workspace extends Component<IProps> {
                          onFileAction={this.handleFileAction}
                          onReloadProject={this.reloadProject}
                          onLoadProject={this.loadProject}
@@ -11926,10 +11931,10 @@ index fbdd0052..13ba8c1d 100644
      }
 diff --git a/src/renderer/helper/localProjectModal.ts b/src/renderer/helper/localProjectModal.ts
 new file mode 100644
-index 00000000..ec3d32d8
+index 00000000..b8679769
 --- /dev/null
 +++ b/src/renderer/helper/localProjectModal.ts
-@@ -0,0 +1,631 @@
+@@ -0,0 +1,632 @@
 +import IpcRendererHelper from './ipcRendererHelper';
 +import RendererUtils from './rendererUtils';
 +import EntryModalHelper from './entry/entryModalHelper';
@@ -12278,9 +12283,10 @@ index 00000000..ec3d32d8
 +                        '삭제',
 +                        'danger',
 +                        async () => {
++                            // 엔트리 확인 창은 (본문, 제목) 순서
 +                            const ok = await EntryModalHelper.getConfirmModal(
-+                                '작품 삭제',
-+                                `'${meta.name}' 작품을 삭제할까요?\n삭제하면 되돌릴 수 없습니다.`
++                                `'${meta.name}' 작품을 삭제할까요?\n삭제하면 되돌릴 수 없습니다.`,
++                                '작품 삭제'
 +                            );
 +                            if (!ok) {
 +                                return;
@@ -12376,8 +12382,8 @@ index 00000000..ec3d32d8
 +                        'danger',
 +                        async () => {
 +                            const ok = await EntryModalHelper.getConfirmModal(
-+                                '작품 삭제',
-+                                `'${file.name}' 작품을 구글 드라이브 휴지통으로 옮길까요?\n드라이브 휴지통에서 30일 동안 복구할 수 있습니다.`
++                                `'${file.name}' 작품을 구글 드라이브 휴지통으로 옮길까요?\n드라이브 휴지통에서 30일 동안 복구할 수 있습니다.`,
++                                '작품 삭제'
 +                            );
 +                            if (!ok) {
 +                                return;
@@ -12563,10 +12569,10 @@ index 00000000..ec3d32d8
 +}
 diff --git a/src/renderer/helper/loginChooser.ts b/src/renderer/helper/loginChooser.ts
 new file mode 100644
-index 00000000..496bc9d6
+index 00000000..eeaef748
 --- /dev/null
 +++ b/src/renderer/helper/loginChooser.ts
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,209 @@
 +/**
 + * [entry-local] 로그인 방법 선택 창: 구글 계정 / 엔트리(네이버 계열)
 + * 고르면 'google' | 'entry', 닫으면 null.
@@ -12684,6 +12690,96 @@ index 00000000..496bc9d6
 +        if (first[0]) {
 +            first[0].focus();
 +        }
++    });
++}
++
++/* ------------------------------------------------------------------ */
++/* 안내 창: 제목 + 번호 매긴 단계 + [취소] [확인]  → true / false        */
++/* ------------------------------------------------------------------ */
++const GUIDE_CSS = `
++.elg-box { width: min(480px, calc(100vw - 32px)); }
++.elg-intro { margin: 0 0 16px; font-size: 14px; color: #555; text-align: center; line-height: 1.6; }
++.elg-steps { list-style: none; margin: 0 0 20px; padding: 0; }
++.elg-step { display: flex; gap: 12px; align-items: flex-start; padding: 10px 0; border-top: 1px solid #eef0f3; }
++.elg-step:first-child { border-top: 0; }
++.elg-num { flex: none; width: 26px; height: 26px; border-radius: 50%; background: #4f80ff; color: #fff;
++  font-size: 14px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
++.elg-head { display: block; font-size: 15px; font-weight: 700; color: #222; }
++.elg-text { display: block; margin-top: 3px; font-size: 13px; color: #777; line-height: 1.5; }
++.elg-buttons { display: flex; gap: 10px; }
++.elg-buttons button { flex: 1; padding: 12px 0; border-radius: 8px; font: inherit; font-size: 15px; cursor: pointer; }
++.elg-cancel { border: 1px solid #4f80ff; background: #fff; color: #4f80ff; }
++.elg-ok { border: 1px solid #4f80ff; background: #4f80ff; color: #fff; font-weight: 700; }
++`;
++
++export function showGuideDialog(options: {
++    title: string;
++    intro?: string;
++    steps: [string, string][];
++    okLabel?: string;
++    cancelLabel?: string;
++}): Promise<boolean> {
++    ensureStyle();
++    if (!document.getElementById(`${STYLE_ID}-guide`)) {
++        const style = document.createElement('style');
++        style.id = `${STYLE_ID}-guide`;
++        style.textContent = GUIDE_CSS;
++        document.head.appendChild(style);
++    }
++    return new Promise((resolve) => {
++        const backdrop = el('div', 'elc-backdrop');
++        const box = el('div', 'elc-box elg-box');
++        box.setAttribute('role', 'dialog');
++        box.setAttribute('aria-modal', 'true');
++        box.setAttribute('aria-label', options.title);
++        box.appendChild(el('h2', 'elc-title', options.title));
++        if (options.intro) {
++            box.appendChild(el('p', 'elg-intro', options.intro));
++        }
++        const list = el('ol', 'elg-steps');
++        options.steps.forEach(([head, text], i) => {
++            const item = el('li', 'elg-step');
++            item.appendChild(el('span', 'elg-num', String(i + 1)));
++            const body = el('span', '');
++            body.appendChild(el('span', 'elg-head', head));
++            if (text) {
++                body.appendChild(el('span', 'elg-text', text));
++            }
++            item.appendChild(body);
++            list.appendChild(item);
++        });
++        box.appendChild(list);
++
++        const buttons = el('div', 'elg-buttons');
++        const cancel = el('button', 'elg-cancel', options.cancelLabel || '취소');
++        const ok = el('button', 'elg-ok', options.okLabel || '확인');
++        cancel.type = 'button';
++        ok.type = 'button';
++        buttons.append(cancel, ok);
++        box.appendChild(buttons);
++
++        const close = (value: boolean) => {
++            document.removeEventListener('keydown', onKey, true);
++            backdrop.remove();
++            resolve(value);
++        };
++        const onKey = (e: KeyboardEvent) => {
++            if (e.key === 'Escape') {
++                e.stopPropagation();
++                close(false);
++            }
++        };
++        cancel.addEventListener('click', () => close(false));
++        ok.addEventListener('click', () => close(true));
++        backdrop.addEventListener('mousedown', (e) => {
++            if (e.target === backdrop) {
++                close(false);
++            }
++        });
++        document.addEventListener('keydown', onKey, true);
++        backdrop.appendChild(box);
++        document.body.appendChild(backdrop);
++        ok.focus();
 +    });
 +}
 diff --git a/src/renderer/renderEntry.tsx b/src/renderer/renderEntry.tsx
