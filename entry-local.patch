@@ -463,12 +463,321 @@ index 00000000..28d6785c
 +    <uses-feature android:name="android.hardware.camera" android:required="false" />
 +    <uses-feature android:name="android.hardware.microphone" android:required="false" />
 +</manifest>
+diff --git a/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
+new file mode 100644
+index 00000000..a34109c9
+--- /dev/null
++++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
+@@ -0,0 +1,303 @@
++package biz.softline.entrylocal;
++
++import android.app.Dialog;
++import android.content.ActivityNotFoundException;
++import android.content.Intent;
++import android.graphics.Color;
++import android.net.Uri;
++import android.os.Handler;
++import android.os.Looper;
++import android.util.TypedValue;
++import android.view.Gravity;
++import android.view.KeyEvent;
++import android.view.ViewGroup;
++import android.view.Window;
++import android.view.WindowManager;
++import android.webkit.CookieManager;
++import android.webkit.WebResourceRequest;
++import android.webkit.WebSettings;
++import android.webkit.WebStorage;
++import android.webkit.WebView;
++import android.webkit.WebViewClient;
++import android.widget.Button;
++import android.widget.LinearLayout;
++import android.widget.TextView;
++import com.getcapacitor.JSObject;
++import com.getcapacitor.Plugin;
++import com.getcapacitor.PluginCall;
++import com.getcapacitor.PluginMethod;
++import com.getcapacitor.annotation.CapacitorPlugin;
++import org.json.JSONObject;
++import org.json.JSONTokener;
++
++/**
++ * [entry-local] 엔트리(playentry.org) 계정 로그인 — 안드로이드
++ *
++ * 엔트리 공식 로그인 페이지를 전체 화면 웹뷰 창에 띄운다. 로그인 후 엔트리 페이지로 이동하면
++ * 페이지에 들어 있는 사용자 정보(id, 아이디, 닉네임)만 읽고 창을 닫는다.
++ * 비밀번호·토큰은 앱이 읽거나 저장하지 않는다. 로그인 세션 쿠키는 앱 전용 웹뷰 저장소에 남는다.
++ * 사용자 정보를 읽는 스크립트(USER_SCRIPT)는 Windows판(src/common/entryAccount.ts)과 같은 내용.
++ */
++@CapacitorPlugin(name = "EntryAccount")
++public class EntryAccountPlugin extends Plugin {
++
++    private static final String ORIGIN = "https://playentry.org";
++    private static final String USER_SCRIPT =
++        "(() => { try {" +
++        " const el = document.getElementById('__NEXT_DATA__'); if (!el) return null;" +
++        " const d = JSON.parse(el.textContent || '{}'); const p = d && d.props || {};" +
++        " const pick = (s) => s && s.common && s.common.user;" +
++        " const u = pick(p.initialState) || pick(p.pageProps && p.pageProps.initialState);" +
++        " const id = u && (u.id || u._id); if (!id) return null;" +
++        " return { id: String(id), username: String(u.username || ''), nickname: String(u.nickname || u.username || '') };" +
++        " } catch (e) { return null; } })()";
++
++    private Dialog loginDialog;
++    private final Handler main = new Handler(Looper.getMainLooper());
++
++    private static boolean isEntryHost(Uri uri) {
++        String host = uri.getHost();
++        return host != null && (host.equals("playentry.org") || host.equals("www.playentry.org"));
++    }
++
++    private static boolean isAfterLogin(String url) {
++        if (url == null) return false;
++        Uri uri = Uri.parse(url);
++        String path = uri.getPath() == null ? "" : uri.getPath();
++        return isEntryHost(uri) && !path.startsWith("/signin");
++    }
++
++    /** evaluateJavascript 결과("null" 또는 JSON 객체 문자열)를 사용자 정보로 */
++    private static JSObject parseUser(String value) {
++        try {
++            Object parsed = new JSONTokener(value).nextValue();
++            if (parsed instanceof JSONObject) {
++                JSONObject o = (JSONObject) parsed;
++                String id = o.optString("id", "");
++                if (id.isEmpty()) return null;
++                JSObject user = new JSObject();
++                user.put("id", id);
++                user.put("username", o.optString("username", ""));
++                user.put("nickname", o.optString("nickname", ""));
++                return user;
++            }
++        } catch (Exception ignored) {
++            // 아래에서 null
++        }
++        return null;
++    }
++
++    private static void configure(WebView view) {
++        WebSettings s = view.getSettings();
++        s.setJavaScriptEnabled(true);
++        s.setDomStorageEnabled(true);
++        s.setSupportMultipleWindows(false); // 팝업 대신 같은 창에서 이동
++        s.setTextZoom(100);
++        CookieManager cookies = CookieManager.getInstance();
++        cookies.setAcceptCookie(true);
++        cookies.setAcceptThirdPartyCookies(view, true); // 네이버·웨일 스페이스 로그인
++    }
++
++    private int dp(int value) {
++        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value, getContext().getResources().getDisplayMetrics());
++    }
++
++    @PluginMethod
++    public void login(final PluginCall call) {
++        main.post(() -> {
++            if (loginDialog != null && loginDialog.isShowing()) {
++                call.reject("이미 로그인 창이 열려 있습니다.", "BUSY");
++                return;
++            }
++            final boolean[] finished = { false };
++            final boolean[] reloadedHome = { false };
++
++            Dialog dialog = new Dialog(getActivity(), android.R.style.Theme_Material_Light_NoActionBar);
++            loginDialog = dialog;
++            dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
++
++            LinearLayout root = new LinearLayout(getContext());
++            root.setOrientation(LinearLayout.VERTICAL);
++            root.setBackgroundColor(Color.WHITE);
++
++            LinearLayout bar = new LinearLayout(getContext());
++            bar.setOrientation(LinearLayout.HORIZONTAL);
++            bar.setGravity(Gravity.CENTER_VERTICAL);
++            bar.setPadding(dp(16), dp(6), dp(8), dp(6));
++            bar.setBackgroundColor(Color.parseColor("#4F80FF"));
++            TextView title = new TextView(getContext());
++            title.setText("엔트리 로그인");
++            title.setTextColor(Color.WHITE);
++            title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
++            bar.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
++            Button close = new Button(getContext(), null, android.R.attr.borderlessButtonStyle);
++            close.setText("닫기");
++            close.setTextColor(Color.WHITE);
++            bar.addView(close);
++            root.addView(bar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
++
++            final WebView web = new WebView(getContext());
++            configure(web);
++            root.addView(web, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
++
++            web.setWebViewClient(new WebViewClient() {
++                @Override
++                public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
++                    Uri uri = request.getUrl();
++                    String scheme = uri.getScheme();
++                    if ("http".equals(scheme) || "https".equals(scheme)) {
++                        return false; // 로그인 창 안에서 이동 (네이버 로그인 포함)
++                    }
++                    // intent:// 등 앱 호출은 시스템에 맡김 (없으면 무시)
++                    try {
++                        Intent intent = "intent".equals(scheme)
++                            ? Intent.parseUri(uri.toString(), Intent.URI_INTENT_SCHEME)
++                            : new Intent(Intent.ACTION_VIEW, uri);
++                        intent.addCategory(Intent.CATEGORY_BROWSABLE);
++                        intent.setComponent(null);
++                        getActivity().startActivity(intent);
++                    } catch (Exception ignored) {
++                        // 처리할 앱 없음
++                    }
++                    return true;
++                }
++
++                @Override
++                public void onPageFinished(final WebView view, String url) {
++                    if (finished[0] || !isAfterLogin(url)) return;
++                    view.evaluateJavascript(USER_SCRIPT, (value) -> {
++                        if (finished[0]) return;
++                        JSObject user = parseUser(value);
++                        if (user != null) {
++                            finished[0] = true;
++                            CookieManager.getInstance().flush();
++                            JSObject result = new JSObject();
++                            result.put("user", user);
++                            call.resolve(result);
++                            dialog.dismiss();
++                        } else if (!reloadedHome[0]) {
++                            // 화면 전환만 된 경우 사용자 정보가 없을 수 있어 첫 화면을 한 번 새로 연다
++                            reloadedHome[0] = true;
++                            view.loadUrl(ORIGIN + "/");
++                        }
++                    });
++                }
++            });
++
++            close.setOnClickListener((v) -> dialog.dismiss());
++            dialog.setOnKeyListener((d, keyCode, event) -> {
++                if (keyCode == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_UP) {
++                    if (web.canGoBack()) {
++                        web.goBack();
++                    } else {
++                        dialog.dismiss();
++                    }
++                    return true;
++                }
++                return keyCode == KeyEvent.KEYCODE_BACK;
++            });
++            dialog.setOnDismissListener((d) -> {
++                loginDialog = null;
++                web.stopLoading();
++                web.destroy();
++                if (!finished[0]) {
++                    finished[0] = true;
++                    call.reject("로그인 창을 닫았습니다.", "CANCELLED");
++                }
++            });
++
++            dialog.setContentView(root);
++            Window w = dialog.getWindow();
++            if (w != null) {
++                w.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
++                // 키보드가 입력칸을 가리지 않도록
++                w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
++            }
++            dialog.show();
++            web.loadUrl(ORIGIN + "/signin");
++        });
++    }
++
++    /** 저장된 세션이 아직 유효한지 화면 없이 확인: { user } 또는 { user: null }, 인터넷 문제면 { error } */
++    @PluginMethod
++    public void check(final PluginCall call) {
++        main.post(() -> {
++            final boolean[] finished = { false };
++            final WebView web = new WebView(getContext());
++            configure(web);
++            final Runnable timeout = () -> {
++                if (finished[0]) return;
++                finished[0] = true;
++                web.destroy();
++                JSObject r = new JSObject();
++                r.put("error", "timeout");
++                call.resolve(r);
++            };
++            web.setWebViewClient(new WebViewClient() {
++                @Override
++                public void onPageFinished(WebView view, String url) {
++                    if (finished[0]) return;
++                    if (!isEntryHost(Uri.parse(url))) return;
++                    view.evaluateJavascript(USER_SCRIPT, (value) -> {
++                        if (finished[0]) return;
++                        finished[0] = true;
++                        main.removeCallbacks(timeout);
++                        JSObject r = new JSObject();
++                        JSObject user = parseUser(value);
++                        r.put("user", user == null ? JSONObject.NULL : user);
++                        call.resolve(r);
++                        web.destroy();
++                    });
++                }
++
++                @Override
++                public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
++                    if (finished[0]) return;
++                    finished[0] = true;
++                    main.removeCallbacks(timeout);
++                    JSObject r = new JSObject();
++                    r.put("error", description == null ? "network" : description);
++                    call.resolve(r);
++                    web.destroy();
++                }
++            });
++            main.postDelayed(timeout, 20000);
++            web.loadUrl(ORIGIN + "/");
++        });
++    }
++
++    @PluginMethod
++    public void logout(final PluginCall call) {
++        main.post(() -> {
++            WebStorage.getInstance().deleteOrigin(ORIGIN);
++            WebStorage.getInstance().deleteOrigin("https://www.playentry.org");
++            CookieManager cookies = CookieManager.getInstance();
++            cookies.removeAllCookies((removed) -> {
++                cookies.flush();
++                call.resolve();
++            });
++        });
++    }
++
++    /** 엔트리 프로필·구글 드라이브 페이지를 기기의 기본 브라우저로 */
++    @PluginMethod
++    public void openUrl(PluginCall call) {
++        String url = call.getString("url", "");
++        Uri uri = Uri.parse(url);
++        String host = uri.getHost() == null ? "" : uri.getHost();
++        boolean allowed = "https".equals(uri.getScheme()) &&
++            (host.equals("playentry.org") || host.equals("www.playentry.org") || host.equals("drive.google.com") || host.equals("myaccount.google.com"));
++        if (!allowed) {
++            call.reject("열 수 없는 주소입니다.");
++            return;
++        }
++        try {
++            Intent intent = new Intent(Intent.ACTION_VIEW, uri);
++            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
++            getActivity().startActivity(intent);
++            call.resolve();
++        } catch (ActivityNotFoundException e) {
++            call.reject("브라우저를 열 수 없습니다.");
++        }
++    }
++}
 diff --git a/mobile/android/app/src/main/java/biz/softline/entrylocal/MainActivity.java b/mobile/android/app/src/main/java/biz/softline/entrylocal/MainActivity.java
 new file mode 100644
-index 00000000..1ce5e4c0
+index 00000000..156195fd
 --- /dev/null
 +++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/MainActivity.java
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,84 @@
 +package biz.softline.entrylocal;
 +
 +import android.content.Intent;
@@ -489,6 +798,8 @@ index 00000000..1ce5e4c0
 +public class MainActivity extends BridgeActivity implements ModifiedMainActivityForSocialLoginPlugin {
 +    @Override
 +    protected void onCreate(Bundle savedInstanceState) {
++        // [entry-local] 엔트리 계정 로그인 (앱 안 플러그인)
++        registerPlugin(EntryAccountPlugin.class);
 +        super.onCreate(savedInstanceState);
 +
 +        // [entry-local] 성능: 화면을 기기의 최고 주사율(90/120Hz)로
@@ -6971,6 +7282,97 @@ index dc07af56..8c75ef68 100644
          "dist:win": "cross-env NODE_ENV=production NODE_OPTIONS=--openssl-legacy-provider webpack && electron-builder -c --win --x64 && electron-builder -c --win --ia32",
          "dist:mac:notarize": "cross-env NODE_ENV=production NODE_OPTIONS=--openssl-legacy-provider webpack && cross-env NOTARIZE=true electron-builder -c --mac",
          "dist:mac": "cross-env NODE_ENV=production NODE_OPTIONS=--openssl-legacy-provider webpack && cross-env NOTARIZE=false electron-builder -c --mac",
+diff --git a/scripts/mock-entry.js b/scripts/mock-entry.js
+new file mode 100644
+index 00000000..fbced3f9
+--- /dev/null
++++ b/scripts/mock-entry.js
+@@ -0,0 +1,85 @@
++#!/usr/bin/env node
++/**
++ * [entry-local] 시험용 가짜 엔트리(playentry.org) 서버
++ * - /signin : 아이디·비밀번호 폼 → 로그인하면 세션 쿠키 + / 로 이동
++ * - /       : 로그인 상태면 __NEXT_DATA__ 에 사용자 정보 (실제 엔트리와 같은 위치)
++ * - /profile/<id>
++ * - /_mock/state, /_mock/expire (세션 만료)
++ * 사용: node scripts/mock-entry.js 8300   →  앱을 ENTRY_LOCAL_ENTRY_BASE=http://127.0.0.1:8300 으로 실행
++ */
++const http = require('http');
++const crypto = require('crypto');
++
++const port = Number(process.argv[2] || 8300);
++const USER = { id: '64f0c0ffee0000000000abcd', username: 'Trapi0332', nickname: '트래피' };
++const sessions = new Set();
++const counters = { logins: 0, homeViews: 0 };
++
++const page = (title, body, nextData) => `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${title}</title>
++<meta name="csrf-token" content="mock-csrf"><meta name="viewport" content="width=device-width"></head>
++<body style="font-family:sans-serif;padding:40px">${body}
++<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(nextData)}</script></body></html>`;
++
++const sessionOf = (req) => {
++    const m = /(?:^|;\s*)mock_session=([^;]+)/.exec(req.headers.cookie || '');
++    return m && sessions.has(m[1]) ? m[1] : undefined;
++};
++
++http.createServer((req, res) => {
++    const url = new URL(req.url, `http://${req.headers.host}`);
++    const send = (status, html, headers = {}) => {
++        res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', ...headers });
++        res.end(html);
++    };
++    if (url.pathname === '/_mock/state') {
++        res.writeHead(200, { 'Content-Type': 'application/json' });
++        return res.end(JSON.stringify({ sessions: sessions.size, counters }));
++    }
++    if (url.pathname === '/_mock/expire') {
++        sessions.clear();
++        res.writeHead(200, { 'Content-Type': 'application/json' });
++        return res.end('{"ok":true}');
++    }
++    if (url.pathname === '/signin' && req.method === 'POST') {
++        let body = '';
++        req.on('data', (c) => (body += c));
++        req.on('end', () => {
++            const p = new URLSearchParams(body);
++            if (p.get('username') === USER.username && p.get('password') === 'pw1234') {
++                const sid = crypto.randomBytes(8).toString('hex');
++                sessions.add(sid);
++                counters.logins++;
++                send(302, '', { Location: '/', 'Set-Cookie': `mock_session=${sid}; Path=/; HttpOnly; Max-Age=2592000` });
++            } else {
++                send(200, page('로그인', '<p id="err">아이디 또는 비밀번호가 틀렸습니다.</p><a href="/signin">다시</a>', { props: { initialState: { common: { user: null } } } }));
++            }
++        });
++        return;
++    }
++    if (url.pathname === '/signin') {
++        if (sessionOf(req)) {
++            return send(302, '', { Location: '/' });
++        }
++        return send(
++            200,
++            page(
++                '로그인',
++                `<h1>로그인</h1><form method="post" action="/signin">
++                 <input id="username" name="username" placeholder="아이디"><input id="password" name="password" type="password">
++                 <button id="submit" type="submit">아이디로 로그인</button></form>`,
++                { props: { initialState: { common: { user: null } } } }
++            )
++        );
++    }
++    if (url.pathname.startsWith('/profile/')) {
++        return send(200, page('프로필', `<h1>프로필 ${url.pathname.slice(9)}</h1>`, { props: {} }));
++    }
++    counters.homeViews++;
++    const logged = !!sessionOf(req);
++    return send(
++        200,
++        page('엔트리', `<h1>엔트리 홈</h1><p>${logged ? '로그인됨' : '로그인 안 됨'}</p>`, {
++            props: { initialState: { common: { user: logged ? { ...USER, _id: USER.id } : null } } },
++        })
++    );
++}).listen(port, '127.0.0.1', () => console.log(`mock entry on ${port}`));
 diff --git a/scripts/mock-google.js b/scripts/mock-google.js
 new file mode 100644
 index 00000000..2c114c34
@@ -7311,7 +7713,7 @@ index 00000000..2c114c34
 +server.listen(PORT, '127.0.0.1', () => console.log(`가짜 구글 서버: ${BASE}`));
 diff --git a/scripts/write-google-config.js b/scripts/write-google-config.js
 new file mode 100644
-index 00000000..95f88a6d
+index 00000000..86986717
 --- /dev/null
 +++ b/scripts/write-google-config.js
 @@ -0,0 +1,47 @@
@@ -7325,7 +7727,7 @@ index 00000000..95f88a6d
 + *   GOOGLE_WEB_CLIENT_ID          안드로이드용 '웹 애플리케이션' 클라이언트 ID
 + *   GOOGLE_MOCK_BASE              (시험용) 가짜 구글 서버 주소. 지정하면 모든 주소를 그쪽으로
 + *
-+ * 아무 값도 없으면 파일을 지운다 → 앱에서 로그인 기능이 숨겨진다.
++ * 아무 값도 없으면 파일을 지운다 → 앱에서 구글 로그인이 숨겨진다 (엔트리 계정 로그인은 별개).
 + */
 +const fs = require('fs');
 +const path = require('path');
@@ -7352,7 +7754,7 @@ index 00000000..95f88a6d
 +    if (fs.existsSync(file)) {
 +        fs.unlinkSync(file);
 +    }
-+    console.log('구글 드라이브 연동: 설정 없음 (로그인 기능 숨김)');
++    console.log('구글 드라이브 연동: 설정 없음 (구글 로그인 숨김, 엔트리 로그인은 그대로)');
 +} else {
 +    fs.mkdirSync(path.dirname(file), { recursive: true });
 +    fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
@@ -7701,12 +8103,90 @@ index 00000000..2e0a75fe
 +export function encodeText(text: string) {
 +    return enc.encode(text);
 +}
+diff --git a/src/common/entryAccount.ts b/src/common/entryAccount.ts
+new file mode 100644
+index 00000000..c54f9d51
+--- /dev/null
++++ b/src/common/entryAccount.ts
+@@ -0,0 +1,72 @@
++/**
++ * [entry-local] 엔트리(playentry.org) 계정 — Windows·안드로이드 공통 상수
++ *
++ * 공식 API 가 없으므로 앱 안에 엔트리 **공식 로그인 페이지**를 띄우고,
++ * 로그인 후 엔트리 페이지에 들어 있는 사용자 정보(Next.js __NEXT_DATA__)만 읽는다.
++ * - 비밀번호는 엔트리 페이지에만 입력되고 앱은 받거나 저장하지 않는다.
++ * - 로그인 세션(쿠키)은 엔트리 로그인 창 전용 저장소에만 남는다 (작품 화면과 분리).
++ * - 앱이 기억하는 것: 사용자 id, 아이디(username), 닉네임.
++ * 엔트리 사이트 구조가 바뀌면 USER_SCRIPT 만 고치면 된다.
++ */
++
++export type EntryUser = { id: string; username: string; nickname: string };
++export type EntryStatus = { loggedIn: boolean; user?: EntryUser };
++
++export const ENTRY_ORIGIN = 'https://playentry.org';
++export const ENTRY_SIGNIN_URL = `${ENTRY_ORIGIN}/signin`;
++export const ENTRY_HOME_URL = `${ENTRY_ORIGIN}/`;
++
++export const entryProfileUrl = (user: EntryUser) => `${ENTRY_ORIGIN}/profile/${encodeURIComponent(user.id)}`;
++
++/** 엔트리 페이지 안에서 실행: 로그인한 사용자 { id, username, nickname } 또는 null (객체를 그대로 반환) */
++export const USER_SCRIPT = `(() => {
++  try {
++    const el = document.getElementById('__NEXT_DATA__');
++    if (!el) return null;
++    const d = JSON.parse(el.textContent || '{}');
++    const p = d && d.props || {};
++    const pick = (s) => s && s.common && s.common.user;
++    const u = pick(p.initialState) || pick(p.pageProps && p.pageProps.initialState);
++    const id = u && (u.id || u._id);
++    if (!id) return null;
++    return { id: String(id), username: String(u.username || ''), nickname: String(u.nickname || u.username || '') };
++  } catch (e) {
++    return null;
++  }
++})()`;
++
++/** 로그인 페이지가 아닌 엔트리 페이지인가 (로그인 완료 후 이동한 곳) */
++export function isEntryPageAfterLogin(url: string, base = ENTRY_ORIGIN) {
++    try {
++        const u = new URL(url);
++        const b = new URL(base);
++        const sameSite = u.host === b.host || (b.hostname === 'playentry.org' && u.hostname === 'www.playentry.org');
++        return sameSite && !u.pathname.startsWith('/signin');
++    } catch (e) {
++        return false;
++    }
++}
++
++export function normalizeEntryUser(value: any): EntryUser | undefined {
++    if (!value || typeof value !== 'object' || !value.id) {
++        return undefined;
++    }
++    return {
++        id: String(value.id),
++        username: String(value.username || ''),
++        nickname: String(value.nickname || value.username || ''),
++    };
++}
++
++/** 앱 밖 브라우저로 열어도 되는 주소 (그 외는 열지 않음) */
++export function isAllowedExternalUrl(url: string) {
++    try {
++        const u = new URL(url);
++        return (
++            u.protocol === 'https:' &&
++            ['playentry.org', 'www.playentry.org', 'drive.google.com', 'myaccount.google.com'].includes(u.hostname)
++        );
++    } catch (e) {
++        return false;
++    }
++}
 diff --git a/src/main/cloudDrive.ts b/src/main/cloudDrive.ts
 new file mode 100644
-index 00000000..d1c668af
+index 00000000..9673de3c
 --- /dev/null
 +++ b/src/main/cloudDrive.ts
-@@ -0,0 +1,394 @@
+@@ -0,0 +1,395 @@
 +import { app, BrowserWindow, ipcMain, net, safeStorage, shell } from 'electron';
 +import http from 'http';
 +import crypto from 'crypto';
@@ -8100,6 +8580,7 @@ index 00000000..d1c668af
 +ipcMain.handle('cloud:rename', wrap((fileId, name) => drive.rename(fileId, name)));
 +ipcMain.handle('cloud:remove', wrap((fileId) => drive.trash(fileId)));
 +ipcMain.handle('cloud:thumbnail', wrap((link) => drive.thumbnail(link)));
++ipcMain.handle('cloud:folderUrl', wrap(async () => `https://drive.google.com/drive/folders/${await drive.ensureFolder()}`));
 +ipcMain.handle('cloud:export', wrap((fileId, destination) => exportFromDrive(fileId, destination)));
 diff --git a/src/main/commonUtils.ts b/src/main/commonUtils.ts
 index fd44b8ce..841f484e 100644
@@ -8115,16 +8596,264 @@ index fd44b8ce..841f484e 100644
          } else {
              return process.env.SERVER_DOMAIN_DEV;
          }
+diff --git a/src/main/entryAccount.ts b/src/main/entryAccount.ts
+new file mode 100644
+index 00000000..3ca226b3
+--- /dev/null
++++ b/src/main/entryAccount.ts
+@@ -0,0 +1,241 @@
++import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
++import path from 'path';
++import fs from 'fs-extra';
++import createLogger from './utils/functions/createLogger';
++import {
++    ENTRY_ORIGIN,
++    EntryStatus,
++    EntryUser,
++    USER_SCRIPT,
++    entryProfileUrl,
++    isAllowedExternalUrl,
++    isEntryPageAfterLogin,
++    normalizeEntryUser,
++} from '../common/entryAccount';
++
++/**
++ * [entry-local] 엔트리(playentry.org) 계정 로그인 — Windows(Electron)
++ *
++ * 엔트리 공식 로그인 페이지를 별도 창(전용 세션 'persist:entry-account')에 띄운다.
++ * 로그인이 끝나 엔트리 페이지로 이동하면 사용자 정보만 읽고 창을 닫는다.
++ * 비밀번호·토큰은 앱이 읽거나 저장하지 않는다 (세션 쿠키는 전용 세션 안에만).
++ */
++
++const logger = createLogger('main/entryAccount.ts');
++const PARTITION = 'persist:entry-account';
++// 시험용: 가짜 엔트리 서버 주소 (평소에는 비어 있음)
++const BASE = (process.env.ENTRY_LOCAL_ENTRY_BASE || ENTRY_ORIGIN).replace(/\/$/, '');
++const storeFile = () => path.join(app.getPath('userData'), 'entry-account.json');
++
++let user: EntryUser | undefined;
++let loaded = false;
++let loginInProgress: Promise<EntryUser> | undefined;
++
++function ensureLoaded() {
++    if (loaded) {
++        return;
++    }
++    loaded = true;
++    try {
++        user = normalizeEntryUser(fs.readJsonSync(storeFile(), { throws: false }));
++    } catch (e) {
++        user = undefined;
++    }
++}
++
++function saveUser(value?: EntryUser) {
++    user = value;
++    try {
++        if (value) {
++            fs.outputJsonSync(storeFile(), value);
++        } else {
++            fs.removeSync(storeFile());
++        }
++    } catch (e) {
++        logger.warn(`entry-account 저장 실패: ${(e as Error).message}`);
++    }
++    notifyStatus();
++}
++
++function status(): EntryStatus {
++    ensureLoaded();
++    return { loggedIn: !!user, user };
++}
++
++function notifyStatus() {
++    BrowserWindow.getAllWindows().forEach((w) => {
++        if (!w.isDestroyed()) {
++            w.webContents.send('entry:status', status());
++        }
++    });
++}
++
++function mainWindow() {
++    return BrowserWindow.getAllWindows().find((w) => !w.isDestroyed() && w.isVisible() && !w.getParentWindow());
++}
++
++async function readUser(win: BrowserWindow): Promise<EntryUser | undefined> {
++    try {
++        return normalizeEntryUser(await win.webContents.executeJavaScript(USER_SCRIPT, true));
++    } catch (e) {
++        return undefined;
++    }
++}
++
++function login(): Promise<EntryUser> {
++    if (loginInProgress) {
++        return loginInProgress;
++    }
++    loginInProgress = new Promise<EntryUser>((resolve, reject) => {
++        const parent = mainWindow();
++        const win = new BrowserWindow({
++            parent,
++            modal: !!parent,
++            width: 560,
++            height: 780,
++            title: '엔트리 로그인',
++            autoHideMenuBar: true,
++            backgroundColor: '#ffffff',
++            webPreferences: {
++                partition: PARTITION,
++                contextIsolation: true,
++                nodeIntegration: false,
++                sandbox: true,
++            },
++        });
++        win.setMenuBarVisibility(false);
++        let done = false;
++        let reloadedHome = false;
++
++        const finish = (result?: EntryUser, error?: Error) => {
++            if (done) {
++                return;
++            }
++            done = true;
++            if (!win.isDestroyed()) {
++                win.close();
++            }
++            if (result) {
++                saveUser(result);
++                // 로그인 쿠키를 바로 디스크에 기록 (앱이 갑자기 꺼져도 로그인 유지)
++                session
++                    .fromPartition(PARTITION)
++                    .cookies.flushStore()
++                    .catch(() => undefined);
++                if (parent && !parent.isDestroyed()) {
++                    parent.focus();
++                }
++                resolve(result);
++            } else {
++                reject(error || new Error('로그인 창을 닫았습니다.'));
++            }
++        };
++
++        const check = async () => {
++            if (done || win.isDestroyed()) {
++                return;
++            }
++            const url = win.webContents.getURL();
++            if (!isEntryPageAfterLogin(url, BASE)) {
++                return;
++            }
++            const found = await readUser(win);
++            if (found) {
++                finish(found);
++            } else if (!reloadedHome) {
++                // 화면 전환만 된 경우 사용자 정보가 페이지에 없을 수 있어 첫 화면을 한 번 새로 연다
++                reloadedHome = true;
++                win.loadURL(`${BASE}/`).catch(() => undefined);
++            }
++        };
++
++        // 네이버·웨일 스페이스 로그인 같은 팝업은 같은 세션의 작은 창으로
++        win.webContents.setWindowOpenHandler(() => ({
++            action: 'allow',
++            overrideBrowserWindowOptions: { parent: win, autoHideMenuBar: true, width: 520, height: 720 },
++        }));
++        win.webContents.on('did-finish-load', check);
++        win.webContents.on('did-navigate-in-page', () => setTimeout(check, 300));
++        win.on('closed', () => finish(undefined));
++        win.loadURL(`${BASE}/signin`).catch((e) => {
++            logger.warn(`엔트리 로그인 페이지 열기 실패: ${e.message}`);
++            finish(undefined, new Error('엔트리 로그인 페이지를 열 수 없습니다. 인터넷 연결을 확인해 주세요.'));
++        });
++    }).finally(() => {
++        loginInProgress = undefined;
++    });
++    return loginInProgress;
++}
++
++async function logout() {
++    saveUser(undefined);
++    try {
++        await session.fromPartition(PARTITION).clearStorageData();
++    } catch (e) {
++        logger.warn(`엔트리 세션 정리 실패: ${(e as Error).message}`);
++    }
++}
++
++/** 앱 시작 후 한 번: 엔트리 세션이 아직 유효한지 조용히 확인 (만료되면 로그아웃 상태로) */
++let verified = false;
++async function verify() {
++    ensureLoaded();
++    if (verified || !user) {
++        return status();
++    }
++    verified = true;
++    const win = new BrowserWindow({
++        show: false,
++        webPreferences: { partition: PARTITION, contextIsolation: true, nodeIntegration: false, sandbox: true },
++    });
++    try {
++        await Promise.race([
++            win.loadURL(`${BASE}/`),
++            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 20000)),
++        ]);
++        const found = await readUser(win);
++        if (found) {
++            saveUser(found); // 닉네임이 바뀌었으면 갱신
++        } else {
++            logger.info('엔트리 세션 만료 — 로그아웃 상태로');
++            saveUser(undefined);
++        }
++    } catch (e) {
++        // 인터넷 끊김 등: 상태를 바꾸지 않는다
++        verified = false;
++    } finally {
++        if (!win.isDestroyed()) {
++            win.destroy();
++        }
++    }
++    return status();
++}
++
++const wrap = (fn: (...args: any[]) => any) => async (event: any, ...args: any[]) => {
++    try {
++        return await fn(...args);
++    } catch (e) {
++        throw new Error((e as Error).message);
++    }
++};
++
++ipcMain.handle('entry:status', wrap(() => status()));
++ipcMain.handle('entry:verify', wrap(() => verify()));
++ipcMain.handle('entry:login', wrap(() => login()));
++ipcMain.handle('entry:logout', wrap(() => logout()));
++ipcMain.handle(
++    'entry:profileUrl',
++    wrap(() => {
++        ensureLoaded();
++        return user ? entryProfileUrl(user).replace(ENTRY_ORIGIN, BASE) : `${BASE}/`;
++    })
++);
++ipcMain.handle(
++    'app:openExternal',
++    wrap(async (url: string) => {
++        if (!isAllowedExternalUrl(url) && !(BASE !== ENTRY_ORIGIN && url.startsWith(BASE))) {
++            throw new Error('열 수 없는 주소입니다.');
++        }
++        await shell.openExternal(url);
++    })
++);
 diff --git a/src/main/ipcMainHelper.ts b/src/main/ipcMainHelper.ts
-index 5983999c..85f76cac 100644
+index 5983999c..ad897155 100644
 --- a/src/main/ipcMainHelper.ts
 +++ b/src/main/ipcMainHelper.ts
-@@ -8,6 +8,8 @@ import checkUpdateRequest from './utils/network/checkUpdate';
+@@ -8,6 +8,9 @@ import checkUpdateRequest from './utils/network/checkUpdate';
  import createLogger from './utils/functions/createLogger';
  import isValidAsarFile, { getPapagoHeaderInfoByValidator } from './utils/functions/isValidAsarFile';
  import fileUtils from './fileUtils';
 +import './localProjectStore'; // [entry-local] 내부 저장소 IPC 등록
 +import './cloudDrive'; // [entry-local] 구글 드라이브 연동 IPC 등록
++import './entryAccount'; // [entry-local] 엔트리 계정 로그인 IPC 등록
  require('@electron/remote/main').initialize();
  
  const logger = createLogger('main/ipcMainHelper.ts');
@@ -8677,28 +9406,39 @@ index 0fa6192c..df5277c3 100644
 +    position: relative;
 +}
 diff --git a/src/renderer/components/header.tsx b/src/renderer/components/header.tsx
-index e7ca0a84..24b54dde 100644
+index e7ca0a84..054ffdf4 100644
 --- a/src/renderer/components/header.tsx
 +++ b/src/renderer/components/header.tsx
-@@ -12,6 +12,8 @@ import ImportToggleHelper from '../helper/importToggleHelper';
+@@ -12,6 +12,19 @@ import ImportToggleHelper from '../helper/importToggleHelper';
  import { IStoreState } from '../store/modules';
  import { IMapDispatchToProps, IMapStateToProps } from '../store';
  import styled from 'styled-components';
 +import { getPerformanceSettings } from '../helper/entry/performance';
-+import { cloudAvailable, cloudReady, getCloudState, subscribeCloud } from '../helper/cloudState';
++import { accountLabel, accountsAvailable, cloudAvailable, cloudReady, getCloudState, subscribeCloud } from '../helper/cloudState';
++
++// [entry-local] 계정 메뉴 동작
++export type AccountAction =
++    | 'login'
++    | 'login_google'
++    | 'login_entry'
++    | 'logout'
++    | 'entry_logout'
++    | 'open_drive'
++    | 'drive_web'
++    | 'entry_profile';
  
  const FoundationLabel = styled.span`
      float: left;
-@@ -33,6 +35,8 @@ interface IProps extends IReduxDispatch, IReduxState {
+@@ -33,6 +46,8 @@ interface IProps extends IReduxDispatch, IReduxState {
      onProgramLanguageChanged: (key: string) => void;
      onLoadProject: () => void;
      onReloadProject: () => void;
 +    onPerformanceChange: (key: 'boost' | 'turbo' | 'fastEngine') => void; // [entry-local]
-+    onAccountAction: (key: 'login' | 'logout' | 'open_drive') => void; // [entry-local] 구글 드라이브
++    onAccountAction: (key: AccountAction) => void; // [entry-local] 구글 드라이브·엔트리 계정
      programLanguageMode: string;
      executionStatus: {
          canRedo: boolean;
-@@ -44,6 +48,16 @@ type DropDownItemPair = [string | ReactElement, string];
+@@ -44,6 +59,16 @@ type DropDownItemPair = [string | ReactElement, string];
  
  class Header extends Component<IProps, IState> {
      dropdownList: any;
@@ -8715,7 +9455,7 @@ index e7ca0a84..24b54dde 100644
  
      constructor(props: Readonly<IProps>) {
          super(props);
-@@ -63,14 +77,29 @@ class Header extends Component<IProps, IState> {
+@@ -63,15 +88,48 @@ class Header extends Component<IProps, IState> {
      get fileList(): DropDownItemPair[] {
          return [
              [RendererUtils.getLang('Workspace.file_new'), 'new'],
@@ -8735,6 +9475,7 @@ index e7ca0a84..24b54dde 100644
 +        }
 +        list.push(
              [RendererUtils.getLang('Workspace.file_save_as'), 'save_as'],
+-        ];
 +            ['파일로 내보내기 (.ent)', 'export'] // [entry-local]
 +        );
 +        return list;
@@ -8742,13 +9483,32 @@ index e7ca0a84..24b54dde 100644
 +
 +    // [entry-local] 계정 메뉴
 +    get accountList(): DropDownItemPair[] {
-+        return [
-+            ['구글 드라이브 작품 열기', 'open_drive'],
-+            ['로그아웃', 'logout'],
-         ];
++        const state = getCloudState();
++        const list: DropDownItemPair[] = [];
++        if (state.entry) {
++            list.push(['엔트리 계정 정보', 'entry_profile']);
++        }
++        if (state.loggedIn) {
++            list.push(['구글 드라이브 열기', 'drive_web']);
++            list.push(['구글 드라이브 작품 열기', 'open_drive']);
++        }
++        if (!state.entry) {
++            list.push(['엔트리 계정 로그인', 'login_entry']);
++        }
++        if (!state.loggedIn && cloudAvailable()) {
++            list.push(['구글 계정 로그인', 'login_google']);
++        }
++        if (state.entry) {
++            list.push([state.loggedIn ? '엔트리 로그아웃' : '로그아웃', 'entry_logout']);
++        }
++        if (state.loggedIn) {
++            list.push([state.entry ? '구글 로그아웃' : '로그아웃', 'logout']);
++        }
++        return list;
      }
  
-@@ -102,6 +131,17 @@ class Header extends Component<IProps, IState> {
+     get helpList(): DropDownItemPair[] {
+@@ -102,6 +160,17 @@ class Header extends Component<IProps, IState> {
          ];
      }
  
@@ -8766,7 +9526,7 @@ index e7ca0a84..24b54dde 100644
      // noti : 가지고 있는 다국어 종류는 4종류이지만, 운영빌드에서는 관리중인 2종류만 제공
      get languageList(): DropDownItemPair[] {
          return [
-@@ -192,6 +232,12 @@ class Header extends Component<IProps, IState> {
+@@ -192,6 +261,12 @@ class Header extends Component<IProps, IState> {
              case 'language':
                  this.handleChangeLanguage(item);
                  break;
@@ -8774,43 +9534,50 @@ index e7ca0a84..24b54dde 100644
 +                this.props.onPerformanceChange(key as 'boost' | 'turbo' | 'fastEngine');
 +                break;
 +            case 'account':
-+                this.props.onAccountAction(key as 'open_drive' | 'logout');
++                this.props.onAccountAction(key as AccountAction);
 +                break;
          }
      }
  
-@@ -393,6 +439,60 @@ class Header extends Component<IProps, IState> {
+@@ -393,6 +468,67 @@ class Header extends Component<IProps, IState> {
                          </div>
                      </div>
  
-+                    {/* [entry-local] 구글 계정: 인터넷 연결 + 설정된 빌드일 때만 */}
-+                    {cloudAvailable() && (
++                    {/* [entry-local] 계정(엔트리·구글): 인터넷이 연결되어 있을 때만 */}
++                    {accountsAvailable() && (
 +                        <div className={'group_inner'}>
 +                            <div className={'work_space'}>
-+                                {getCloudState().loggedIn ? (
++                                {getCloudState().loggedIn || getCloudState().entry ? (
 +                                    <a
 +                                        className={`link_workspace_text text_work_space account_name ${
 +                                            dropdownType === 'account' ? 'on' : ''
 +                                        }`}
-+                                        title={getCloudState().email || ''}
++                                        title={
++                                            [
++                                                getCloudState().entry && `엔트리: ${getCloudState().entry!.username}`,
++                                                getCloudState().loggedIn && `구글: ${getCloudState().email || ''}`,
++                                            ]
++                                                .filter(Boolean)
++                                                .join('\n')
++                                        }
 +                                        ref={(dom) => (this.dropdownList.account = dom)}
 +                                        onClick={() => {
 +                                            this.handleDropdownClick('account');
 +                                        }}
 +                                    >
-+                                        {getCloudState().name || getCloudState().email || '내 계정'}
++                                        {accountLabel()}
 +                                    </a>
 +                                ) : (
 +                                    <a
 +                                        className={'link_workspace_text text_work_space no_arrow'}
-+                                        title={'구글 계정으로 로그인하면 작품을 구글 드라이브에 저장할 수 있습니다.'}
++                                        title={'엔트리 또는 구글 계정으로 로그인'}
 +                                        onClick={() => {
-+                                            if (!getCloudState().busy) {
++                                            if (!getCloudState().busy && !getCloudState().entryBusy) {
 +                                                this.props.onAccountAction('login');
 +                                            }
 +                                        }}
 +                                    >
-+                                        {getCloudState().busy ? '로그인 중…' : '로그인'}
++                                        {getCloudState().busy || getCloudState().entryBusy ? '로그인 중…' : '로그인'}
 +                                    </a>
 +                                )}
 +                                {this.makeDropdown('account', this.accountList)}
@@ -8841,10 +9608,17 @@ index e7ca0a84..24b54dde 100644
                      {lang === 'ko' && (
                          <div className={'group_inner'}>
 diff --git a/src/renderer/components/workspace.tsx b/src/renderer/components/workspace.tsx
-index 32eb38dd..0ec02c41 100644
+index 32eb38dd..96cd79b2 100644
 --- a/src/renderer/components/workspace.tsx
 +++ b/src/renderer/components/workspace.tsx
-@@ -23,6 +23,34 @@ import { IMapDispatchToProps, IMapStateToProps } from '../store';
+@@ -1,5 +1,5 @@
+ import React, { Component } from 'react';
+-import Header from './header';
++import Header, { AccountAction } from './header';
+ import './workspace.scss';
+ import '../resources/styles/fonts.scss';
+ import { connect } from 'react-redux';
+@@ -23,6 +23,39 @@ import { IMapDispatchToProps, IMapStateToProps } from '../store';
  import DragAndDropContainer from './DragAndDropContainer';
  import EntryModalHelper from '../helper/entry/entryModalHelper';
  import ipcRendererHelper from '../helper/ipcRendererHelper';
@@ -8865,21 +9639,26 @@ index 32eb38dd..0ec02c41 100644
 +} from '../helper/entry/performance';
 +import { installEngineBoost } from '../helper/entry/engineBoost';
 +import {
++    accountApi,
 +    cloudApi,
++    cloudAvailable,
 +    cloudErrorMessage,
 +    cloudLogin,
 +    cloudLogout,
 +    cloudReady,
++    entryLogin,
++    entryLogout,
 +    getCloudState,
 +    startCloudState,
 +} from '../helper/cloudState';
++import { chooseLoginMethod } from '../helper/loginChooser';
 +
 +// [entry-local] 내부 저장소 자동 저장 주기 (변경이 있을 때만)
 +const AUTO_SAVE_INTERVAL = 60 * 1000;
  
  interface IProps extends IReduxDispatch, IReduxState {}
  
-@@ -34,6 +62,12 @@ class Workspace extends Component<IProps> {
+@@ -34,6 +67,12 @@ class Workspace extends Component<IProps> {
      private isFirstRender = true;
      private isSavingCanvasData = false;
      private isSaveProject = false;
@@ -8892,7 +9671,7 @@ index 32eb38dd..0ec02c41 100644
      private defaultInitOption = {
          type: 'workspace',
          backpackDisable: true,
-@@ -60,7 +94,15 @@ class Workspace extends Component<IProps> {
+@@ -60,7 +99,15 @@ class Workspace extends Component<IProps> {
      };
  
      get initOption() {
@@ -8909,7 +9688,7 @@ index 32eb38dd..0ec02c41 100644
      }
  
      constructor(props: Readonly<IProps>) {
-@@ -86,7 +128,9 @@ class Workspace extends Component<IProps> {
+@@ -86,7 +133,9 @@ class Workspace extends Component<IProps> {
      }
  
      componentDidMount() {
@@ -8920,7 +9699,7 @@ index 32eb38dd..0ec02c41 100644
          setTimeout(async () => {
              await this._waitFontLoad();
              try {
-@@ -108,6 +152,12 @@ class Workspace extends Component<IProps> {
+@@ -108,6 +157,12 @@ class Workspace extends Component<IProps> {
          }, 0);
      }
  
@@ -8933,7 +9712,7 @@ index 32eb38dd..0ec02c41 100644
      componentDidUpdate(prevProps: Readonly<IProps>): void {
          if (
              prevProps.common.projectName &&
-@@ -162,6 +212,14 @@ class Workspace extends Component<IProps> {
+@@ -162,6 +217,14 @@ class Workspace extends Component<IProps> {
          addEventListener('saveAsWorkspace', () => {
              this.handleSaveAction('saveAs');
          });
@@ -8948,7 +9727,7 @@ index 32eb38dd..0ec02c41 100644
          addEventListener('saveCanvasImage', (data: any) => {
              this.handleCanvasImageSave(data);
          });
-@@ -373,6 +431,9 @@ class Workspace extends Component<IProps> {
+@@ -373,6 +436,9 @@ class Workspace extends Component<IProps> {
          const project = Entry.exportProject();
          if (project) {
              project.name = this._getProjectName();
@@ -8958,7 +9737,7 @@ index 32eb38dd..0ec02c41 100644
              Object.assign(project, option);
              LocalStorageManager.saveProject(project);
          }
-@@ -438,78 +499,305 @@ class Workspace extends Component<IProps> {
+@@ -438,78 +504,354 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -9012,7 +9791,7 @@ index 32eb38dd..0ec02c41 100644
 +            if (!(await EntryModalHelper.getConfirmModal('구글 드라이브에 저장하려면 로그인이 필요합니다.\n지금 로그인할까요?'))) {
 +                return;
 +            }
-+            if (!(await this.handleAccountAction('login'))) {
++            if (!(await this.handleAccountAction('login_google'))) {
 +                return;
 +            }
 +        }
@@ -9048,33 +9827,82 @@ index 32eb38dd..0ec02c41 100644
 +        }
 +    };
 +
-+    /** [entry-local] 로그인 / 로그아웃 / 드라이브 작품 열기 */
-+    handleAccountAction = async (key: 'login' | 'logout' | 'open_drive'): Promise<boolean> => {
-+        if (key === 'open_drive') {
-+            this.openLocalProjectList('drive');
-+            return true;
-+        }
-+        if (key === 'logout') {
-+            const email = getCloudState().email;
-+            if (!(await EntryModalHelper.getConfirmModal(`${email || '구글 계정'}에서 로그아웃할까요?\n이 기기에 저장된 작품은 그대로 남습니다.`))) {
-+                return false;
++    /** [entry-local] 계정: 로그인(방법 선택) / 로그아웃 / 드라이브·엔트리 페이지 열기 */
++    handleAccountAction = async (key: AccountAction): Promise<boolean> => {
++        const isCancel = (err: any) => /닫았습니다|CANCELLED|취소/.test(String((err && err.message) || err || ''));
++        switch (key) {
++            case 'open_drive':
++                this.openLocalProjectList('drive');
++                return true;
++            case 'drive_web':
++            case 'entry_profile':
++                try {
++                    const url = key === 'drive_web' ? await accountApi.driveFolderUrl() : await accountApi.entryProfileUrl();
++                    await accountApi.openExternal(url);
++                    return true;
++                } catch (err) {
++                    console.error(err);
++                    EntryModalHelper.getAlertModal(`페이지를 열지 못했습니다.\n${cloudErrorMessage(err)}`);
++                    return false;
++                }
++            case 'login': {
++                // 로그인 방법 선택: 구글(설정된 빌드만) / 엔트리·네이버 계열
++                const google = cloudAvailable() && !getCloudState().loggedIn;
++                const entry = !getCloudState().entry;
++                const choice = google && entry ? await chooseLoginMethod({ google, entry }) : google ? 'google' : 'entry';
++                if (!choice) {
++                    return false;
++                }
++                return this.handleAccountAction(choice === 'google' ? 'login_google' : 'login_entry');
 +            }
-+            await cloudLogout();
-+            if (this.saveTarget === 'drive') {
-+                this.saveTarget = 'local';
++            case 'login_entry':
++                try {
++                    const user = await entryLogin();
++                    Entry.toast.success('로그인 완료', `${user.nickname || user.username} 님, 엔트리 계정으로 로그인했습니다.`);
++                    return true;
++                } catch (err) {
++                    if (!isCancel(err)) {
++                        console.error(err);
++                        EntryModalHelper.getAlertModal(`엔트리 로그인을 하지 못했습니다.\n${cloudErrorMessage(err)}`);
++                    }
++                    return false;
++                }
++            case 'entry_logout': {
++                const entryUser = getCloudState().entry;
++                const label = entryUser ? `${entryUser.nickname || entryUser.username} (엔트리)` : '엔트리 계정';
++                if (!(await EntryModalHelper.getConfirmModal(`${label}에서 로그아웃할까요?`))) {
++                    return false;
++                }
++                await entryLogout();
++                Entry.toast.success('로그아웃', '엔트리 계정에서 로그아웃했습니다.');
++                return true;
 +            }
-+            Entry.toast.success('로그아웃', '구글 계정에서 로그아웃했습니다.');
-+            return true;
-+        }
-+        try {
-+            Entry.toast.success('구글 로그인', '로그인 창에서 계정을 선택해 주세요.');
-+            const status = await cloudLogin();
-+            Entry.toast.success('로그인 완료', `${status.email || status.name || ''} 계정으로 로그인했습니다.`);
-+            return true;
-+        } catch (err) {
-+            console.error(err);
-+            EntryModalHelper.getAlertModal(`로그인하지 못했습니다.\n${cloudErrorMessage(err)}`);
-+            return false;
++            case 'logout': {
++                const email = getCloudState().email;
++                if (!(await EntryModalHelper.getConfirmModal(`${email || '구글 계정'}에서 로그아웃할까요?\n이 기기에 저장된 작품은 그대로 남습니다.`))) {
++                    return false;
++                }
++                await cloudLogout();
++                if (this.saveTarget === 'drive') {
++                    this.saveTarget = 'local';
++                }
++                Entry.toast.success('로그아웃', '구글 계정에서 로그아웃했습니다.');
++                return true;
++            }
++            case 'login_google':
++            default:
++                try {
++                    Entry.toast.success('구글 로그인', '로그인 창에서 계정을 선택해 주세요.');
++                    const status = await cloudLogin();
++                    Entry.toast.success('로그인 완료', `${status.email || status.name || ''} 계정으로 로그인했습니다.`);
++                    return true;
++                } catch (err) {
++                    if (!isCancel(err)) {
++                        console.error(err);
++                        EntryModalHelper.getAlertModal(`로그인하지 못했습니다.\n${cloudErrorMessage(err)}`);
++                    }
++                    return false;
++                }
 +        }
 +    };
 +
@@ -9250,7 +10078,7 @@ index 32eb38dd..0ec02c41 100644
 +            initialTab,
 +            currentId: this.localProjectId,
 +            currentCloudId: this.cloudFileId,
-+            onLogin: () => this.handleAccountAction('login'),
++            onLogin: () => this.handleAccountAction('login_google'),
 +            onOpenCloud: async (fileId: string) => {
 +                if (fileId !== this.cloudFileId && !(await EntryUtils.confirmProjectWillDismiss())) {
 +                    return;
@@ -9316,7 +10144,7 @@ index 32eb38dd..0ec02c41 100644
      };
  
      handleFileAction = async (type: string) => {
-@@ -518,6 +806,10 @@ class Workspace extends Component<IProps> {
+@@ -518,6 +860,10 @@ class Workspace extends Component<IProps> {
                  await RendererUtils.clearTempProject();
                  await this.loadProject();
              }
@@ -9327,7 +10155,7 @@ index 32eb38dd..0ec02c41 100644
          } else if (type === 'open_offline') {
              this._loadProjectFromFile(
                  () =>
-@@ -576,11 +868,30 @@ class Workspace extends Component<IProps> {
+@@ -576,11 +922,30 @@ class Workspace extends Component<IProps> {
          let projectWorkspaceMode = currentWorkspaceMode;
  
          if (project) {
@@ -9358,7 +10186,7 @@ index 32eb38dd..0ec02c41 100644
              delete this.projectSavedPath;
              delete this.projectParent;
              CommonActions.changeProjectName(RendererUtils.getDefaultProjectName());
-@@ -602,8 +913,14 @@ class Workspace extends Component<IProps> {
+@@ -602,8 +967,14 @@ class Workspace extends Component<IProps> {
          }
          Entry.reloadBlock();
          this.isFirstRender = false;
@@ -9373,7 +10201,7 @@ index 32eb38dd..0ec02c41 100644
          try {
              if (project) {
                  await Entry.loadExternalModules(project);
-@@ -633,9 +950,36 @@ class Workspace extends Component<IProps> {
+@@ -633,9 +1004,36 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -9410,7 +10238,7 @@ index 32eb38dd..0ec02c41 100644
          await this.loadProject(project);
      };
  
-@@ -717,6 +1061,8 @@ class Workspace extends Component<IProps> {
+@@ -717,6 +1115,8 @@ class Workspace extends Component<IProps> {
                          onFileAction={this.handleFileAction}
                          onReloadProject={this.reloadProject}
                          onLoadProject={this.loadProject}
@@ -9421,14 +10249,17 @@ index 32eb38dd..0ec02c41 100644
                          executionStatus={executionStatus}
 diff --git a/src/renderer/helper/cloudState.ts b/src/renderer/helper/cloudState.ts
 new file mode 100644
-index 00000000..f940a41a
+index 00000000..46aa503e
 --- /dev/null
 +++ b/src/renderer/helper/cloudState.ts
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,183 @@
 +/**
-+ * [entry-local] 구글 드라이브 로그인 상태 + 인터넷 연결 상태
++ * [entry-local] 구글 드라이브·엔트리 계정 로그인 상태 + 인터넷 연결 상태
 + * 상단 메뉴·내 작품 창·저장 메뉴가 같이 쓴다.
 + */
++
++export type EntryUser = { id: string; username: string; nickname: string };
++export type EntryStatus = { loggedIn: boolean; user?: EntryUser };
 +
 +export type CloudStatus = {
 +    configured: boolean; // 이 빌드에 구글 설정이 들어 있는가
@@ -9438,13 +10269,14 @@ index 00000000..f940a41a
 +};
 +
 +type Listener = (state: CloudState) => void;
-+export type CloudState = CloudStatus & { online: boolean; busy: boolean };
++export type CloudState = CloudStatus & { online: boolean; busy: boolean; entry?: EntryUser; entryBusy: boolean };
 +
 +let state: CloudState = {
 +    configured: false,
 +    loggedIn: false,
 +    online: typeof navigator === 'undefined' ? true : navigator.onLine !== false,
 +    busy: false,
++    entryBusy: false,
 +};
 +const listeners: Listener[] = [];
 +let started = false;
@@ -9467,6 +10299,24 @@ index 00000000..f940a41a
 +    return cloudAvailable() && state.loggedIn;
 +}
 +
++/** 상단 로그인 버튼을 보일지: 인터넷이 연결되어 있을 때 (엔트리 로그인은 설정 없이 가능) */
++export function accountsAvailable() {
++    return state.online;
++}
++
++/** 상단에 보일 계정 이름: 엔트리 닉네임 → 구글 이름 → 구글 메일 */
++export function accountLabel() {
++    if (state.entry) {
++        return state.entry.nickname || state.entry.username || '엔트리 계정';
++    }
++    if (state.loggedIn) {
++        return state.name || state.email || '구글 계정';
++    }
++    return '';
++}
++
++const setEntry = (status?: EntryStatus) => set({ entry: status && status.loggedIn ? status.user : undefined });
++
 +export function subscribeCloud(fn: Listener) {
 +    listeners.push(fn);
 +    return () => {
@@ -9482,11 +10332,21 @@ index 00000000..f940a41a
 +        return;
 +    }
 +    started = true;
-+    window.addEventListener('online', () => set({ online: true }));
++    window.addEventListener('online', () => {
++        set({ online: true });
++        entryVerify();
++    });
 +    window.addEventListener('offline', () => set({ online: false }));
 +    if (window.ipcListen) {
 +        window.ipcListen('cloud:status', (_event: any, status: CloudStatus) => set({ ...status }));
++        window.ipcListen('entry:status', (_event: any, status: EntryStatus) => setEntry(status));
 +    }
++    window
++        .ipcInvoke<EntryStatus>('entry:status')
++        .then(setEntry)
++        .catch(() => undefined);
++    // 저장된 엔트리 로그인이 아직 유효한지 잠시 뒤 조용히 확인
++    setTimeout(entryVerify, 4000);
 +    window
 +        .ipcInvoke<CloudStatus>('cloud:status')
 +        .then((status) => status && set({ ...status }))
@@ -9510,6 +10370,38 @@ index 00000000..f940a41a
 +    const status = await window.ipcInvoke<CloudStatus>('cloud:status');
 +    set({ ...status });
 +}
++
++function entryVerify() {
++    if (!state.entry || !state.online) {
++        return;
++    }
++    window
++        .ipcInvoke<EntryStatus>('entry:verify')
++        .then(setEntry)
++        .catch(() => undefined);
++}
++
++export async function entryLogin() {
++    set({ entryBusy: true });
++    try {
++        const user = await window.ipcInvoke<EntryUser>('entry:login');
++        setEntry({ loggedIn: true, user });
++        return user;
++    } finally {
++        set({ entryBusy: false });
++    }
++}
++
++export async function entryLogout() {
++    await window.ipcInvoke('entry:logout');
++    setEntry({ loggedIn: false });
++}
++
++export const accountApi = {
++    driveFolderUrl: () => window.ipcInvoke<string>('cloud:folderUrl'),
++    entryProfileUrl: () => window.ipcInvoke<string>('entry:profileUrl'),
++    openExternal: (url: string) => window.ipcInvoke<void>('app:openExternal', url),
++};
 +
 +export type CloudFileMeta = {
 +    id: string;
@@ -10839,6 +11731,131 @@ index 00000000..70d99e79
 +    }
 +    search.focus();
 +}
+diff --git a/src/renderer/helper/loginChooser.ts b/src/renderer/helper/loginChooser.ts
+new file mode 100644
+index 00000000..496bc9d6
+--- /dev/null
++++ b/src/renderer/helper/loginChooser.ts
+@@ -0,0 +1,119 @@
++/**
++ * [entry-local] 로그인 방법 선택 창: 구글 계정 / 엔트리(네이버 계열)
++ * 고르면 'google' | 'entry', 닫으면 null.
++ */
++
++export type LoginChoice = 'google' | 'entry';
++
++const STYLE_ID = 'entry-local-login-chooser-style';
++const CSS = `
++.elc-backdrop { position: fixed; inset: 0; z-index: 8990; background: rgba(0,0,0,.45);
++  display: flex; align-items: center; justify-content: center; font-family: NanumGothic, sans-serif; }
++.elc-box { width: min(420px, calc(100vw - 32px)); background: #fff; border-radius: 14px; padding: 26px 24px 20px;
++  box-shadow: 0 12px 40px rgba(0,0,0,.25); box-sizing: border-box; }
++.elc-title { margin: 0 0 6px; font-size: 20px; font-weight: 700; color: #222; text-align: center; }
++.elc-desc { margin: 0 0 20px; font-size: 13px; color: #777; text-align: center; line-height: 1.5; }
++.elc-btn { display: flex; align-items: center; gap: 14px; width: 100%; box-sizing: border-box; margin: 0 0 10px;
++  padding: 14px 16px; border-radius: 10px; border: 1px solid #dadce0; background: #fff; cursor: pointer; text-align: left;
++  font: inherit; color: #222; transition: background .15s, border-color .15s; }
++.elc-btn:hover, .elc-btn:focus-visible { background: #f5f8ff; border-color: #4f80ff; outline: none; }
++.elc-btn.elc-opt-entry { border-color: #16d8a3; }
++.elc-btn.elc-opt-entry:hover, .elc-btn.elc-opt-entry:focus-visible { background: #effcf7; border-color: #10b98a; }
++.elc-icon { flex: none; width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
++  font-weight: 800; font-size: 18px; }
++.elc-icon.elc-opt-google { background: #fff; border: 1px solid #e0e0e0; color: #4285f4; }
++.elc-icon.elc-opt-entry { background: #16d8a3; color: #fff; }
++.elc-label { display: block; font-size: 15px; font-weight: 700; }
++.elc-sub { display: block; margin-top: 3px; font-size: 12px; color: #888; }
++.elc-close { display: block; margin: 8px auto 0; padding: 8px 18px; border: 0; background: none; color: #888; font: inherit;
++  font-size: 13px; cursor: pointer; }
++.elc-note { margin: 4px 0 0; font-size: 11px; color: #999; text-align: center; line-height: 1.5; }
++`;
++
++function ensureStyle() {
++    if (!document.getElementById(STYLE_ID)) {
++        const style = document.createElement('style');
++        style.id = STYLE_ID;
++        style.textContent = CSS;
++        document.head.appendChild(style);
++    }
++}
++
++function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string) {
++    const node = document.createElement(tag);
++    node.className = className;
++    if (text !== undefined) {
++        node.textContent = text;
++    }
++    return node;
++}
++
++let open = false;
++
++export function chooseLoginMethod(options: { google: boolean; entry: boolean }): Promise<LoginChoice | null> {
++    if (open) {
++        return Promise.resolve(null);
++    }
++    open = true;
++    ensureStyle();
++    return new Promise((resolve) => {
++        const backdrop = el('div', 'elc-backdrop');
++        const box = el('div', 'elc-box');
++        box.setAttribute('role', 'dialog');
++        box.setAttribute('aria-modal', 'true');
++        box.setAttribute('aria-label', '로그인 방법 선택');
++        box.appendChild(el('h2', 'elc-title', '로그인'));
++        box.appendChild(el('p', 'elc-desc', '어떤 계정으로 로그인할까요?'));
++
++        const close = (choice: LoginChoice | null) => {
++            document.removeEventListener('keydown', onKey, true);
++            backdrop.remove();
++            open = false;
++            resolve(choice);
++        };
++        const onKey = (e: KeyboardEvent) => {
++            if (e.key === 'Escape') {
++                e.stopPropagation();
++                close(null);
++            }
++        };
++
++        const addButton = (choice: LoginChoice, icon: string, label: string, sub: string) => {
++            const btn = el('button', `elc-btn elc-opt-${choice}`);
++            btn.type = 'button';
++            btn.appendChild(el('span', `elc-icon elc-opt-${choice}`, icon));
++            const text = el('span', '');
++            text.appendChild(el('span', 'elc-label', label));
++            text.appendChild(el('span', 'elc-sub', sub));
++            btn.appendChild(text);
++            btn.addEventListener('click', () => close(choice));
++            box.appendChild(btn);
++            return btn;
++        };
++
++        const first: HTMLButtonElement[] = [];
++        if (options.google) {
++            first.push(addButton('google', 'G', 'Google 계정', '작품을 내 구글 드라이브에 저장'));
++        }
++        if (options.entry) {
++            first.push(addButton('entry', 'e', '엔트리 · 네이버 계열', '엔트리 아이디 · 네이버 · 웨일 스페이스'));
++            box.appendChild(el('p', 'elc-note', '엔트리 공식 로그인 화면이 열립니다. 비밀번호는 이 앱에 저장되지 않습니다.'));
++        }
++        const cancel = el('button', 'elc-close', '닫기');
++        cancel.type = 'button';
++        cancel.addEventListener('click', () => close(null));
++        box.appendChild(cancel);
++
++        backdrop.addEventListener('mousedown', (e) => {
++            if (e.target === backdrop) {
++                close(null);
++            }
++        });
++        document.addEventListener('keydown', onKey, true);
++        backdrop.appendChild(box);
++        document.body.appendChild(backdrop);
++        if (first[0]) {
++            first[0].focus();
++        }
++    });
++}
 diff --git a/src/renderer/renderEntry.tsx b/src/renderer/renderEntry.tsx
 index 87cc6c6d..96586da0 100644
 --- a/src/renderer/renderEntry.tsx
@@ -11178,6 +12195,112 @@ index 00000000..fe27e100
 +export async function driveClient() {
 +    await loadConfig();
 +    return drive.client;
++}
+diff --git a/src/web/entryAccountWeb.ts b/src/web/entryAccountWeb.ts
+new file mode 100644
+index 00000000..d5a0855d
+--- /dev/null
++++ b/src/web/entryAccountWeb.ts
+@@ -0,0 +1,100 @@
++import { registerPlugin } from '@capacitor/core';
++import { EntryStatus, EntryUser, ENTRY_HOME_URL, entryProfileUrl, isAllowedExternalUrl, normalizeEntryUser } from '../common/entryAccount';
++import { isNative } from './platform';
++import { emit } from './bus';
++
++/**
++ * [entry-local/web] 엔트리 계정 — 안드로이드는 앱 안 플러그인(EntryAccountPlugin.java)이
++ * 엔트리 공식 로그인 페이지를 띄운다. 브라우저 미리보기에서는 지원하지 않는다(다른 사이트 정보를 읽을 수 없음).
++ */
++
++interface EntryAccountPlugin {
++    login(): Promise<{ user: EntryUser }>;
++    check(): Promise<{ user?: EntryUser | null; error?: string }>;
++    logout(): Promise<void>;
++    openUrl(options: { url: string }): Promise<void>;
++}
++
++const EntryAccount = registerPlugin<EntryAccountPlugin>('EntryAccount');
++const KEY = 'entryLocalEntryAccount';
++
++let user: EntryUser | undefined = (() => {
++    try {
++        return normalizeEntryUser(JSON.parse(localStorage.getItem(KEY) || 'null'));
++    } catch (e) {
++        return undefined;
++    }
++})();
++
++function save(value?: EntryUser) {
++    user = value;
++    try {
++        if (value) {
++            localStorage.setItem(KEY, JSON.stringify(value));
++        } else {
++            localStorage.removeItem(KEY);
++        }
++    } catch (e) {
++        // 저장이 막힌 환경
++    }
++    emit('entry:status', entryStatus());
++}
++
++export function entryStatus(): EntryStatus {
++    return { loggedIn: !!user, user };
++}
++
++export async function entryLogin(): Promise<EntryUser> {
++    if (!isNative()) {
++        throw new Error('엔트리 로그인은 설치한 앱(안드로이드·Windows)에서만 됩니다.');
++    }
++    const res = await EntryAccount.login();
++    const found = normalizeEntryUser(res && res.user);
++    if (!found) {
++        throw new Error('엔트리 계정 정보를 읽지 못했습니다.');
++    }
++    save(found);
++    return found;
++}
++
++export async function entryLogout() {
++    save(undefined);
++    if (isNative()) {
++        await EntryAccount.logout().catch(() => undefined);
++    }
++}
++
++/** 앱 시작 후 한 번: 엔트리 세션이 아직 유효한지 조용히 확인 */
++let verified = false;
++export async function entryVerify(): Promise<EntryStatus> {
++    if (verified || !user || !isNative()) {
++        return entryStatus();
++    }
++    verified = true;
++    try {
++        const res = await EntryAccount.check();
++        if (res.error) {
++            verified = false; // 인터넷 문제: 상태 유지, 다음에 다시
++        } else {
++            save(normalizeEntryUser(res.user));
++        }
++    } catch (e) {
++        verified = false;
++    }
++    return entryStatus();
++}
++
++export function entryProfile() {
++    return user ? entryProfileUrl(user) : ENTRY_HOME_URL;
++}
++
++export async function openExternal(url: string) {
++    if (!isAllowedExternalUrl(url)) {
++        throw new Error('열 수 없는 주소입니다.');
++    }
++    if (isNative()) {
++        await EntryAccount.openUrl({ url });
++    } else {
++        window.open(url, '_blank', 'noopener');
++    }
 +}
 diff --git a/src/web/media.ts b/src/web/media.ts
 new file mode 100644
@@ -12249,10 +13372,10 @@ index 00000000..9bd437ca
 +}
 diff --git a/src/web/webMain.ts b/src/web/webMain.ts
 new file mode 100644
-index 00000000..dfcaaa77
+index 00000000..d8e79326
 --- /dev/null
 +++ b/src/web/webMain.ts
-@@ -0,0 +1,931 @@
+@@ -0,0 +1,940 @@
 +import XLSX from 'xlsx';
 +import { vfs, join, basename, extname, normalize } from './vfs';
 +import { packTarGz, unpackTarGz, TarEntry } from './tar';
@@ -12271,6 +13394,7 @@ index 00000000..dfcaaa77
 +    loadImage,
 +} from './media';
 +import { cloudStatus, cloudLogin, cloudLogout, driveClient } from './cloudWeb';
++import { entryStatus, entryLogin, entryLogout, entryVerify, entryProfile, openExternal } from './entryAccountWeb';
 +import {
 +    PICK,
 +    readPicked,
@@ -13154,6 +14278,14 @@ index 00000000..dfcaaa77
 +    'cloud:remove': async (fileId: string) => (await driveClient()).trash(fileId),
 +    'cloud:thumbnail': async (link: string) => (await driveClient()).thumbnail(link),
 +    'cloud:export': (fileId: string, destination: string) => cloud.exportTo(fileId, destination),
++    'cloud:folderUrl': async () => `https://drive.google.com/drive/folders/${await (await driveClient()).ensureFolder()}`,
++    // [entry-local] 엔트리 계정
++    'entry:status': () => entryStatus(),
++    'entry:verify': () => entryVerify(),
++    'entry:login': () => entryLogin(),
++    'entry:logout': () => entryLogout(),
++    'entry:profileUrl': () => entryProfile(),
++    'app:openExternal': (url: string) => openExternal(url),
 +});
 +
 +/** Electron IPC 는 인자를 복제해서 넘긴다. 같은 동작을 해야 렌더러 객체가 바뀌지 않는다. */
