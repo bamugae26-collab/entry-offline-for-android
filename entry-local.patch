@@ -468,12 +468,16 @@ new file mode 100644
 index 00000000..e5c4d523
 --- /dev/null
 +++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
-@@ -0,0 +1,662 @@
+@@ -0,0 +1,686 @@
 +package biz.softline.entrylocal;
 +
 +import android.app.Dialog;
 +import android.content.ActivityNotFoundException;
++import android.content.Context;
 +import android.content.Intent;
++import android.print.PrintAttributes;
++import android.print.PrintDocumentAdapter;
++import android.print.PrintManager;
 +import android.graphics.Color;
 +import android.net.Uri;
 +import android.os.Handler;
@@ -1110,6 +1114,26 @@ index 00000000..e5c4d523
 +    }
 +
 +    /** 엔트리 프로필·구글 드라이브 페이지를 기기의 기본 브라우저로 */
++    /** [entry-local] 출력하기: 지금 웹 화면(출력용 화면)을 안드로이드 인쇄 창으로 보낸다 */
++    @PluginMethod
++    public void printPage(final PluginCall call) {
++        final String title = call.getString("title", "엔트리 작품");
++        getActivity().runOnUiThread(new Runnable() {
++            @Override
++            public void run() {
++                try {
++                    WebView web = getBridge().getWebView();
++                    PrintManager manager = (PrintManager) getActivity().getSystemService(Context.PRINT_SERVICE);
++                    PrintDocumentAdapter adapter = web.createPrintDocumentAdapter(title);
++                    manager.print(title, adapter, new PrintAttributes.Builder().build());
++                    call.resolve();
++                } catch (Exception e) {
++                    call.reject("인쇄를 시작하지 못했습니다.");
++                }
++            }
++        });
++    }
++
 +    @PluginMethod
 +    public void openUrl(PluginCall call) {
 +        String url = call.getString("url", "");
@@ -10317,7 +10341,7 @@ diff --git a/src/renderer/components/header.scss b/src/renderer/components/heade
 index 0fa6192c..df5277c3 100644
 --- a/src/renderer/components/header.scss
 +++ b/src/renderer/components/header.scss
-@@ -366,3 +366,24 @@
+@@ -366,3 +366,64 @@
  [role='button'] {
      cursor: pointer;
  }
@@ -10325,11 +10349,51 @@ index 0fa6192c..df5277c3 100644
 +/* [entry-local] 구글 로그인 버튼 / 계정 이름 */
 +/* 기존 .group_box .link_workspace_text(margin-top 8px)보다 우선하도록 선택자를 길게 — 높이 25px 알약을 다른 글자(15px)와 가운데 맞춤 */
 +.group_box .link_workspace_text.text_work_space.no_arrow {
-+    margin-top: 3px;
 +    margin-right: 0;
-+    padding: 4px 12px;
-+    border: 1px solid rgba(255, 255, 255, 0.85);
-+    border-radius: 14px;
++    padding-right: 4px;
++}
++/* 웹판처럼 '로그인 회원가입'을 글자로만 표시 */
++.group_box .link_workspace_text.text_work_space.no_arrow + .link_workspace_text.no_arrow {
++    margin-left: 6px;
++}
++/* 톱니바퀴(설정) 아이콘 — 성능 메뉴 */
++.group_box .link_workspace_text.btn_settings_gear {
++    display: inline-flex;
++    align-items: center;
++    margin-top: 0;
++    padding: 0 4px;
++}
++.group_box .link_workspace_text.btn_settings_gear:after {
++    display: none;
++}
++.group_box .link_workspace_text.btn_settings_gear svg {
++    width: 26px;
++    height: 26px;
++    fill: rgba(255, 255, 255, 0.85);
++}
++.group_box .link_workspace_text.btn_settings_gear.on svg,
++.group_box .link_workspace_text.btn_settings_gear:hover svg {
++    fill: #fff;
++}
++/* 출력 버튼 — 웹판처럼 흰 동그라미 */
++.group_box .link_workspace_text.btn_print_project {
++    display: inline-flex;
++    align-items: center;
++    justify-content: center;
++    width: 34px;
++    height: 34px;
++    margin-top: 0;
++    padding: 0;
++    border-radius: 50%;
++    background: #fff;
++}
++.group_box .link_workspace_text.btn_print_project:after {
++    display: none;
++}
++.group_box .link_workspace_text.btn_print_project svg {
++    width: 22px;
++    height: 22px;
++    fill: #4f80ff;
 +}
 +.text_work_space.no_arrow:after {
 +    display: none;
@@ -10346,11 +10410,12 @@ diff --git a/src/renderer/components/header.tsx b/src/renderer/components/header
 index e7ca0a84..859bb347 100644
 --- a/src/renderer/components/header.tsx
 +++ b/src/renderer/components/header.tsx
-@@ -12,6 +12,20 @@ import ImportToggleHelper from '../helper/importToggleHelper';
+@@ -12,6 +12,22 @@ import ImportToggleHelper from '../helper/importToggleHelper';
  import { IStoreState } from '../store/modules';
  import { IMapDispatchToProps, IMapStateToProps } from '../store';
  import styled from 'styled-components';
 +import { getPerformanceSettings } from '../helper/entry/performance';
++import { openPrintView } from '../helper/printProject';
 +import { accountLabel, accountsAvailable, cloudAvailable, cloudReady, getCloudState, subscribeCloud } from '../helper/cloudState';
 +
 +// [entry-local] 계정 메뉴 동작
@@ -10358,6 +10423,7 @@ index e7ca0a84..859bb347 100644
 +    | 'login'
 +    | 'login_google'
 +    | 'login_entry'
++    | 'signup'
 +    | 'logout'
 +    | 'entry_logout'
 +    | 'open_drive'
@@ -10367,7 +10433,7 @@ index e7ca0a84..859bb347 100644
  
  const FoundationLabel = styled.span`
      float: left;
-@@ -33,6 +47,8 @@ interface IProps extends IReduxDispatch, IReduxState {
+@@ -33,6 +49,8 @@ interface IProps extends IReduxDispatch, IReduxState {
      onProgramLanguageChanged: (key: string) => void;
      onLoadProject: () => void;
      onReloadProject: () => void;
@@ -10376,7 +10442,7 @@ index e7ca0a84..859bb347 100644
      programLanguageMode: string;
      executionStatus: {
          canRedo: boolean;
-@@ -44,6 +60,16 @@ type DropDownItemPair = [string | ReactElement, string];
+@@ -44,6 +62,16 @@ type DropDownItemPair = [string | ReactElement, string];
  
  class Header extends Component<IProps, IState> {
      dropdownList: any;
@@ -10393,7 +10459,7 @@ index e7ca0a84..859bb347 100644
  
      constructor(props: Readonly<IProps>) {
          super(props);
-@@ -63,15 +89,56 @@ class Header extends Component<IProps, IState> {
+@@ -63,15 +91,56 @@ class Header extends Component<IProps, IState> {
      get fileList(): DropDownItemPair[] {
          return [
              [RendererUtils.getLang('Workspace.file_new'), 'new'],
@@ -10454,7 +10520,7 @@ index e7ca0a84..859bb347 100644
      }
  
      get helpList(): DropDownItemPair[] {
-@@ -102,6 +169,17 @@ class Header extends Component<IProps, IState> {
+@@ -102,6 +171,17 @@ class Header extends Component<IProps, IState> {
          ];
      }
  
@@ -10472,7 +10538,7 @@ index e7ca0a84..859bb347 100644
      // noti : 가지고 있는 다국어 종류는 4종류이지만, 운영빌드에서는 관리중인 2종류만 제공
      get languageList(): DropDownItemPair[] {
          return [
-@@ -192,6 +270,12 @@ class Header extends Component<IProps, IState> {
+@@ -192,6 +272,12 @@ class Header extends Component<IProps, IState> {
              case 'language':
                  this.handleChangeLanguage(item);
                  break;
@@ -10485,10 +10551,27 @@ index e7ca0a84..859bb347 100644
          }
      }
  
-@@ -393,6 +477,67 @@ class Header extends Component<IProps, IState> {
+@@ -393,6 +479,97 @@ class Header extends Component<IProps, IState> {
                          </div>
                      </div>
  
++                    {/* [entry-local] 출력하기 (웹판의 출력 버튼) */}
++                    <div className={'group_inner'}>
++                        <div className={'work_space'}>
++                            <a
++                                className={'link_workspace_text btn_print_project'}
++                                title={'출력하기'}
++                                onClick={() => {
++                                    openPrintView(((this.props as any).common || {}).projectName);
++                                }}
++                            >
++                                <svg viewBox="0 0 24 24" aria-label="출력하기">
++                                    <path d="M19 8H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zm-3 11H8v-5h8v5zm3-7c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm-1-9H6v4h12V3z" />
++                                </svg>
++                            </a>
++                        </div>
++                    </div>
++
 +                    {/* [entry-local] 계정(엔트리·구글): 인터넷이 연결되어 있을 때만 */}
 +                    {accountsAvailable() && (
 +                        <div className={'group_inner'}>
@@ -10526,6 +10609,17 @@ index e7ca0a84..859bb347 100644
 +                                        {getCloudState().busy || getCloudState().entryBusy ? '로그인 중…' : '로그인'}
 +                                    </a>
 +                                )}
++                                {!(getCloudState().loggedIn || getCloudState().entry) && (
++                                    <a
++                                        className={'link_workspace_text text_work_space no_arrow'}
++                                        title={'엔트리 회원가입 페이지 열기'}
++                                        onClick={() => {
++                                            this.props.onAccountAction('signup');
++                                        }}
++                                    >
++                                        회원가입
++                                    </a>
++                                )}
 +                                {this.makeDropdown('account', this.accountList)}
 +                            </div>
 +                        </div>
@@ -10535,7 +10629,7 @@ index e7ca0a84..859bb347 100644
 +                    <div className={'group_inner'}>
 +                        <div className={'work_space'}>
 +                            <a
-+                                className={`link_workspace_text text_work_space ${
++                                className={`link_workspace_text text_work_space btn_settings_gear ${
 +                                    dropdownType === 'performance' ? 'on' : ''
 +                                }`}
 +                                title={'부스트 모드: GPU로 무대를 그립니다. 터보 모드: 블록을 더 빠르게 실행합니다.'}
@@ -10544,7 +10638,9 @@ index e7ca0a84..859bb347 100644
 +                                    this.handleDropdownClick('performance');
 +                                }}
 +                            >
-+                                성능
++                                <svg viewBox="0 0 24 24" aria-label="설정 (성능)">
++                                    <path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7.03 7.03 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.56-1.63.94l-2.39-.96a.5.5 0 0 0-.61.22L2.71 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.31.61.22l2.39-.96c.5.38 1.04.7 1.63.94l.36 2.54c.04.24.25.42.5.42h3.84c.25 0 .46-.18.5-.42l.36-2.54c.59-.24 1.13-.56 1.63-.94l2.39.96c.22.09.48 0 .61-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.6a3.6 3.6 0 1 1 0-7.2 3.6 3.6 0 0 1 0 7.2z" />
++                                </svg>
 +                            </a>
 +                            {this.makeDropdown('performance', this.performanceList)}
 +                        </div>
@@ -10697,7 +10793,7 @@ index 32eb38dd..78d1d265 100644
              Object.assign(project, option);
              LocalStorageManager.saveProject(project);
          }
-@@ -438,78 +518,430 @@ class Workspace extends Component<IProps> {
+@@ -438,78 +518,439 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -10857,6 +10953,15 @@ index 32eb38dd..78d1d265 100644
 +                try {
 +                    const url = key === 'drive_web' ? await accountApi.driveFolderUrl() : await accountApi.entryProfileUrl();
 +                    await accountApi.openExternal(url);
++                    return true;
++                } catch (err) {
++                    console.error(err);
++                    EntryModalHelper.getAlertModal(`페이지를 열지 못했습니다.\n${cloudErrorMessage(err)}`);
++                    return false;
++                }
++            case 'signup':
++                try {
++                    await accountApi.openExternal('https://playentry.org/signup');
 +                    return true;
 +                } catch (err) {
 +                    console.error(err);
@@ -11180,7 +11285,7 @@ index 32eb38dd..78d1d265 100644
      };
  
      handleFileAction = async (type: string) => {
-@@ -518,6 +950,10 @@ class Workspace extends Component<IProps> {
+@@ -518,6 +959,10 @@ class Workspace extends Component<IProps> {
                  await RendererUtils.clearTempProject();
                  await this.loadProject();
              }
@@ -11191,7 +11296,7 @@ index 32eb38dd..78d1d265 100644
          } else if (type === 'open_offline') {
              this._loadProjectFromFile(
                  () =>
-@@ -576,11 +1012,33 @@ class Workspace extends Component<IProps> {
+@@ -576,11 +1021,33 @@ class Workspace extends Component<IProps> {
          let projectWorkspaceMode = currentWorkspaceMode;
  
          if (project) {
@@ -11225,7 +11330,7 @@ index 32eb38dd..78d1d265 100644
              delete this.projectSavedPath;
              delete this.projectParent;
              CommonActions.changeProjectName(RendererUtils.getDefaultProjectName());
-@@ -602,8 +1060,14 @@ class Workspace extends Component<IProps> {
+@@ -602,8 +1069,14 @@ class Workspace extends Component<IProps> {
          }
          Entry.reloadBlock();
          this.isFirstRender = false;
@@ -11240,7 +11345,7 @@ index 32eb38dd..78d1d265 100644
          try {
              if (project) {
                  await Entry.loadExternalModules(project);
-@@ -633,9 +1097,38 @@ class Workspace extends Component<IProps> {
+@@ -633,9 +1106,38 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -11279,7 +11384,7 @@ index 32eb38dd..78d1d265 100644
          await this.loadProject(project);
      };
  
-@@ -717,6 +1210,8 @@ class Workspace extends Component<IProps> {
+@@ -717,6 +1219,8 @@ class Workspace extends Component<IProps> {
                          onFileAction={this.handleFileAction}
                          onReloadProject={this.reloadProject}
                          onLoadProject={this.loadProject}
@@ -12237,6 +12342,423 @@ index 00000000..bfff941b
 +        StorageManager.saveTempProject(currentProject);
 +    }
 +    location.reload();
++}
+diff --git a/src/renderer/helper/printProject.ts b/src/renderer/helper/printProject.ts
+new file mode 100644
+index 00000000..4b7c1f2a
+--- /dev/null
++++ b/src/renderer/helper/printProject.ts
+@@ -0,0 +1,411 @@
++/**
++ * [entry-local] 출력하기 — 웹판(playentry.org/print)의 출력 화면과 같은 구성으로
++ * 작품 이름, 작품 전체 무대, 장면별 무대, 오브젝트 표(그림 · 속성 · 코드)를 한 화면에 모아 보여 주고 인쇄한다.
++ *
++ * - 서버와 통신하지 않는다. 지금 열려 있는 작품(Entry)에서 바로 읽는다.
++ * - 코드 그림은 코드 화면(블록 SVG)을 그대로 떠서 넣는다. 블록 모양은 지금 화면과 같다.
++ * - 인쇄: Windows 는 window.print(), 안드로이드는 앱 안 플러그인(EntryAccount.printPage)으로 시스템 인쇄 창을 띄운다.
++ */
++
++const OVERLAY_ID = 'entry-local-print';
++const STYLE_ID = 'entry-local-print-style';
++
++const entry = (): any => (window as any).Entry;
++const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
++
++function esc(value: any): string {
++    const map: { [key: string]: string } = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
++    return String(value === undefined || value === null ? '' : value).replace(/[&<>"']/g, (c) => map[c]);
++}
++
++function num(value: any, digits = 0): string {
++    const n = Number(value);
++    return isFinite(n) ? n.toFixed(digits) : '0';
++}
++
++function trimmed(value: any): string {
++    const n = Number(value);
++    return isFinite(n) ? String(Number(n.toFixed(1))) : '0';
++}
++
++/** 지금 보이는 장면의 무대를 그림(JPEG)으로 */
++function stageImage(): string | undefined {
++    try {
++        const stage = entry().stage;
++        if (stage && stage.handle && stage.handle.setVisible) {
++            stage.handle.setVisible(false);
++        }
++        if (stage && stage.update) {
++            stage.update();
++        }
++        const source: HTMLCanvasElement | undefined = stage && stage.canvas && stage.canvas.canvas;
++        if (!source || !source.width || !source.height) {
++            return undefined;
++        }
++        const canvas = document.createElement('canvas');
++        canvas.width = source.width;
++        canvas.height = source.height;
++        const context = canvas.getContext('2d');
++        if (!context) {
++            return undefined;
++        }
++        context.fillStyle = '#ffffff';
++        context.fillRect(0, 0, canvas.width, canvas.height);
++        context.drawImage(source, 0, 0);
++        return canvas.toDataURL('image/jpeg', 0.85);
++    } catch (e) {
++        console.warn('stage image failed', e);
++        return undefined;
++    }
++}
++
++/** 오브젝트 목록에 보이는 그림을 그대로 가져오고, 안 되면 그림 파일 주소로 */
++function objectThumb(object: any): string | undefined {
++    try {
++        const view: HTMLElement | undefined = object.view_;
++        if (view && view.querySelector) {
++            const canvas = view.querySelector('canvas') as HTMLCanvasElement | null;
++            if (canvas && canvas.width) {
++                return canvas.toDataURL('image/png');
++            }
++            const img = view.querySelector('img') as HTMLImageElement | null;
++            if (img && img.src) {
++                return img.src;
++            }
++            const nodes = view.querySelectorAll('div');
++            for (let i = 0; i < nodes.length; i += 1) {
++                const bg = getComputedStyle(nodes[i]).backgroundImage;
++                const found = bg && /url\(["']?(.*?)["']?\)/.exec(bg);
++                if (found && found[1]) {
++                    return found[1];
++                }
++            }
++        }
++        if (object.thumbUrl) {
++            return object.thumbUrl;
++        }
++        const picture =
++            (object.entity && object.entity.picture) ||
++            object.selectedPicture ||
++            (object.pictures && object.pictures[0]);
++        if (picture) {
++            if (picture.fileurl) {
++                return picture.fileurl;
++            }
++            if (picture.filename) {
++                const f: string = picture.filename;
++                const ext = picture.imageType === 'svg' ? 'svg' : 'png';
++                return `${entry().defaultPath || ''}/uploads/${f.substring(0, 2)}/${f.substring(2, 4)}/image/${f}.${ext}`;
++            }
++        }
++    } catch (e) {
++        console.warn('thumbnail failed', e);
++    }
++    return undefined;
++}
++
++const COPY_STYLES = [
++    'fill',
++    'fill-opacity',
++    'stroke',
++    'stroke-width',
++    'stroke-opacity',
++    'font-family',
++    'font-size',
++    'font-weight',
++    'opacity',
++    'display',
++    'visibility',
++];
++
++/** 코드 화면(블록 SVG)을 잘라서 하나의 SVG 문자열로. 지금 선택된 오브젝트의 코드가 대상 */
++function codeSvg(): string | undefined {
++    try {
++        const workspace = entry().getMainWS && entry().getMainWS();
++        const board = workspace && (workspace.board || (workspace.getBoard && workspace.getBoard()));
++        const group: SVGGraphicsElement | undefined = board && (board.svgBlockGroup || board.svgGroup);
++        if (!group || !group.firstChild || !group.getBBox) {
++            return undefined;
++        }
++        const box = group.getBBox();
++        if (!box || !box.width || !box.height) {
++            return undefined;
++        }
++        const clone = group.cloneNode(true) as SVGGraphicsElement;
++        const originals = group.querySelectorAll('*');
++        const copies = clone.querySelectorAll('*');
++        for (let i = 0; i < originals.length && i < copies.length; i += 1) {
++            const computed = getComputedStyle(originals[i]);
++            const target = copies[i] as unknown as HTMLElement;
++            COPY_STYLES.forEach((name) => {
++                const value = computed.getPropertyValue(name);
++                if (value && target.style) {
++                    target.style.setProperty(name, value);
++                }
++            });
++        }
++        clone.removeAttribute('transform');
++        const pad = 8;
++        const width = Math.ceil(box.width + pad * 2);
++        const height = Math.ceil(box.height + pad * 2);
++        return (
++            `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
++            `viewBox="${box.x - pad} ${box.y - pad} ${width} ${height}" width="${width}" height="${height}">` +
++            new XMLSerializer().serializeToString(clone) +
++            '</svg>'
++        );
++    } catch (e) {
++        console.warn('code capture failed', e);
++        return undefined;
++    }
++}
++
++interface PrintObject {
++    name: string;
++    thumb?: string;
++    x: string;
++    y: string;
++    size: string;
++    rotation: string;
++    direction: string;
++    code?: string;
++}
++
++interface PrintScene {
++    name: string;
++    image?: string;
++    objects: PrintObject[];
++}
++
++/** 작품 전체를 읽는다. 장면·오브젝트를 하나씩 선택해 그림을 뜨고, 끝나면 원래 선택으로 되돌린다. */
++async function collect(): Promise<{ projectImage?: string; scenes: PrintScene[] }> {
++    const E = entry();
++    const sceneApi = E.scene;
++    const scenes: any[] = (sceneApi && sceneApi.getScenes && sceneApi.getScenes()) || [];
++    const objects: any[] = (E.container && E.container.getAllObjects && E.container.getAllObjects()) || [];
++    const originalScene = sceneApi && sceneApi.selectedScene;
++    const originalObject = E.playground && E.playground.object;
++
++    const projectImage = stageImage();
++    const result: PrintScene[] = [];
++
++    const readObject = async (object: any): Promise<PrintObject> => {
++        let code: string | undefined;
++        try {
++            E.container.selectObject(object.id, true);
++            await wait(180);
++            code = codeSvg();
++        } catch (e) {
++            console.warn('select object failed', e);
++        }
++        const entity = object.entity || {};
++        const get = (fn: string, fallback = 0) => (entity[fn] ? entity[fn]() : fallback);
++        return {
++            name: object.name || '',
++            thumb: objectThumb(object),
++            x: trimmed(get('getX')),
++            y: trimmed(get('getY')),
++            size: num(get('getSize', 100), 1),
++            rotation: `${num(get('getRotation'))}°`,
++            direction: `${num(get('getDirection', 90))}°`,
++            code,
++        };
++    };
++
++    if (scenes.length === 0) {
++        const list: PrintObject[] = [];
++        for (const object of objects) {
++            list.push(await readObject(object));
++        }
++        result.push({ name: '장면 1', image: projectImage, objects: list });
++    } else {
++        for (const scene of scenes) {
++            try {
++                if (sceneApi.selectedScene !== scene) {
++                    sceneApi.selectScene(scene);
++                    await wait(350);
++                }
++            } catch (e) {
++                console.warn('select scene failed', e);
++            }
++            const image = stageImage();
++            const list: PrintObject[] = [];
++            for (const object of objects.filter((o) => o.scene && o.scene.id === scene.id)) {
++                list.push(await readObject(object));
++            }
++            result.push({ name: scene.name || '장면', image, objects: list });
++        }
++    }
++
++    try {
++        if (originalScene && sceneApi.selectedScene !== originalScene) {
++            sceneApi.selectScene(originalScene);
++            await wait(200);
++        }
++        if (originalObject) {
++            E.container.selectObject(originalObject.id, true);
++        }
++    } catch (e) {
++        console.warn('restore selection failed', e);
++    }
++    return { projectImage, scenes: result };
++}
++
++const PRINT_ICON =
++    '<svg viewBox="0 0 24 24"><path d="M19 8H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zm-3 11H8v-5h8v5zm3-7c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm-1-9H6v4h12V3z"/></svg>';
++
++const STYLE = `
++#${OVERLAY_ID}{position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483000;background:#fff;overflow:auto;font-family:'NanumGothic','Nanum Gothic',sans-serif;color:#222;-webkit-overflow-scrolling:touch}
++#${OVERLAY_ID} .elp-bar{position:sticky;top:0;z-index:2;display:flex;align-items:center;height:52px;padding:0 20px;background:#4f80ff;color:#fff}
++#${OVERLAY_ID} .elp-bar .elp-dot{width:5px;height:5px;border-radius:50%;background:#fff;margin-right:14px}
++#${OVERLAY_ID} .elp-bar .elp-title{flex:1;font-size:22px;font-weight:bold}
++#${OVERLAY_ID} .elp-bar button{display:inline-flex;align-items:center;justify-content:center;border:0;cursor:pointer;margin-left:12px}
++#${OVERLAY_ID} .elp-print{width:38px;height:38px;border-radius:50%;background:#fff}
++#${OVERLAY_ID} .elp-print svg{width:24px;height:24px;fill:#4f80ff}
++#${OVERLAY_ID} .elp-close{height:34px;padding:0 14px;border-radius:17px;background:rgba(255,255,255,.2);color:#fff;font-size:15px}
++#${OVERLAY_ID} .elp-page{padding:24px 40px 60px;max-width:1100px}
++#${OVERLAY_ID} h1{font-size:26px;margin:12px 0 14px}
++#${OVERLAY_ID} h2{font-size:21px;margin:30px 0 12px}
++#${OVERLAY_ID} h2:before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:#4f80ff;margin-right:12px;vertical-align:top}
++#${OVERLAY_ID} .elp-stage{border:1px solid #cdeee8;background:#fff;display:flex;align-items:center;justify-content:center}
++#${OVERLAY_ID} .elp-stage.big{width:100%;max-width:960px;aspect-ratio:16/9}
++#${OVERLAY_ID} .elp-stage.small{width:70%;max-width:700px;aspect-ratio:16/9}
++#${OVERLAY_ID} .elp-stage img{max-width:100%;max-height:100%;display:block}
++#${OVERLAY_ID} .elp-note{color:#888;font-size:14px}
++#${OVERLAY_ID} hr{border:0;border-top:2px solid #d5e6f3;margin:34px 0 0}
++#${OVERLAY_ID} .elp-table{margin-top:26px;border:1px solid #b9d3e8;border-radius:22px;overflow:hidden}
++#${OVERLAY_ID} .elp-row{display:grid;grid-template-columns:22% 24% 54%;border-top:1px solid #b9d3e8;break-inside:avoid;page-break-inside:avoid}
++#${OVERLAY_ID} .elp-row.head{background:#d6e6f4;border-top:0;font-weight:bold;text-align:center;font-size:17px}
++#${OVERLAY_ID} .elp-row.head div{padding:16px 6px}
++#${OVERLAY_ID} .elp-cell{padding:18px 14px;border-left:1px solid #b9d3e8;min-width:0}
++#${OVERLAY_ID} .elp-cell:first-child{border-left:0;text-align:center}
++#${OVERLAY_ID} .elp-thumb{display:inline-block;width:110px;border:1px solid #d5e6f3;border-radius:10px;overflow:hidden;background:#fff}
++#${OVERLAY_ID} .elp-thumb .img{height:90px;display:flex;align-items:center;justify-content:center}
++#${OVERLAY_ID} .elp-thumb img{max-width:90%;max-height:85px}
++#${OVERLAY_ID} .elp-thumb .name{background:#d6e6f4;font-size:13px;padding:6px 4px;word-break:break-all}
++#${OVERLAY_ID} .elp-prop{display:flex;font-size:15px;line-height:2.1}
++#${OVERLAY_ID} .elp-prop b{width:52%}
++#${OVERLAY_ID} .elp-code svg{max-width:100%;height:auto;display:block}
++@media print{
++  body > *:not(#${OVERLAY_ID}){display:none !important}
++  html,body{height:auto !important;overflow:visible !important;background:#fff !important}
++  #${OVERLAY_ID}{position:static !important;overflow:visible !important;height:auto !important}
++  #${OVERLAY_ID} .elp-bar{display:none !important}
++  #${OVERLAY_ID} .elp-page{padding:0;max-width:none}
++  @page{margin:12mm}
++}`;
++
++function ensureStyle() {
++    if (!document.getElementById(STYLE_ID)) {
++        const style = document.createElement('style');
++        style.id = STYLE_ID;
++        style.textContent = STYLE;
++        document.head.appendChild(style);
++    }
++}
++
++async function doPrint(title: string) {
++    const cap = (window as any).Capacitor;
++    const plugin = cap && cap.Plugins && cap.Plugins.EntryAccount;
++    if (cap && cap.isNativePlatform && cap.isNativePlatform() && plugin && plugin.printPage) {
++        try {
++            await plugin.printPage({ title });
++            return;
++        } catch (e) {
++            console.warn('native print failed', e);
++        }
++    }
++    window.print();
++}
++
++function closeOverlay() {
++    const old = document.getElementById(OVERLAY_ID);
++    if (old && old.parentNode) {
++        old.parentNode.removeChild(old);
++    }
++}
++
++function render(title: string, data: { projectImage?: string; scenes: PrintScene[] }) {
++    const stage = (image: string | undefined, cls: string) =>
++        `<div class="elp-stage ${cls}">${image ? `<img src="${image}">` : '<span class="elp-note">무대 그림을 가져오지 못했습니다.</span>'}</div>`;
++
++    const rows = (objects: PrintObject[]) =>
++        objects
++            .map(
++                (o) => `
++<div class="elp-row">
++  <div class="elp-cell"><div class="elp-thumb"><div class="img">${o.thumb ? `<img src="${esc(o.thumb)}">` : ''}</div><div class="name">${esc(o.name)}</div></div></div>
++  <div class="elp-cell">
++    <div class="elp-prop"><b>X</b><span>${esc(o.x)}</span></div>
++    <div class="elp-prop"><b>Y</b><span>${esc(o.y)}</span></div>
++    <div class="elp-prop"><b>크기</b><span>${esc(o.size)}</span></div>
++    <div class="elp-prop"><b>이동 방향(°)</b><span>${esc(o.direction)}</span></div>
++    <div class="elp-prop"><b>방향(°)</b><span>${esc(o.rotation)}</span></div>
++  </div>
++  <div class="elp-cell elp-code">${o.code || '<span class="elp-note">코드를 가져오지 못했습니다. (블록 코딩 화면에서 출력해 주세요)</span>'}</div>
++</div>`
++            )
++            .join('');
++
++    const sections = data.scenes
++        .map(
++            (scene) => `
++<h2>${esc(scene.name)}</h2>
++${stage(scene.image, 'small')}
++<div class="elp-table">
++  <div class="elp-row head"><div>오브젝트</div><div>속성</div><div>코드</div></div>
++  ${rows(scene.objects)}
++</div>`
++        )
++        .join('');
++
++    const overlay = document.getElementById(OVERLAY_ID);
++    if (!overlay) {
++        return;
++    }
++    const page = overlay.querySelector('.elp-page');
++    if (page) {
++        page.innerHTML = `<h1>${esc(title)}</h1>${stage(data.projectImage, 'big')}<hr>${sections}`;
++    }
++}
++
++/** 출력 화면을 열고 작품 내용을 채운다 */
++export async function openPrintView(projectName?: string) {
++    const E = entry();
++    if (!E || !E.container) {
++        return;
++    }
++    if (E.engine && E.engine.isState && E.engine.isState('run')) {
++        try {
++            E.toast.warning('출력하기', '작품 실행을 멈춘 뒤에 출력해 주세요.');
++        } catch (e) {
++            alert('작품 실행을 멈춘 뒤에 출력해 주세요.');
++        }
++        return;
++    }
++    ensureStyle();
++    closeOverlay();
++    const title = projectName || '엔트리 작품';
++    const overlay = document.createElement('div');
++    overlay.id = OVERLAY_ID;
++    overlay.innerHTML =
++        `<div class="elp-bar"><span class="elp-dot"></span><span class="elp-title">출력하기</span>` +
++        `<button class="elp-close" type="button">닫기</button>` +
++        `<button class="elp-print" type="button" title="인쇄">${PRINT_ICON}</button></div>` +
++        `<div class="elp-page"><p class="elp-note">출력 화면을 만드는 중입니다…</p></div>`;
++    document.body.appendChild(overlay);
++    (overlay.querySelector('.elp-close') as HTMLElement).onclick = closeOverlay;
++    (overlay.querySelector('.elp-print') as HTMLElement).onclick = () => {
++        doPrint(title);
++    };
++
++    try {
++        render(title, await collect());
++    } catch (e) {
++        console.error(e);
++        const page = overlay.querySelector('.elp-page');
++        if (page) {
++            page.innerHTML = '<p class="elp-note">출력 화면을 만들지 못했습니다.</p>';
++        }
++    }
 +}
 diff --git a/src/renderer/helper/ipcRendererHelper.ts b/src/renderer/helper/ipcRendererHelper.ts
 index fbdd0052..13ba8c1d 100644
