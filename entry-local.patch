@@ -468,7 +468,7 @@ new file mode 100644
 index 00000000..e5c4d523
 --- /dev/null
 +++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
-@@ -0,0 +1,686 @@
+@@ -0,0 +1,715 @@
 +package biz.softline.entrylocal;
 +
 +import android.app.Dialog;
@@ -658,6 +658,25 @@ index 00000000..e5c4d523
 +                main.postDelayed(poll[0], 400);
 +            };
 +
++            // 엔트리가 로그인 후 페이지를 새로 열지 않고 화면만 바꾸는 경우(주소만 바뀜) 처리.
++            // 이때 페이지 안의 사용자 정보(__NEXT_DATA__)는 로그인 전 것 그대로라서, 한 번 새로 고쳐서 읽는다.
++            // (Windows판의 did-navigate-in-page 처리와 같다)
++            final Runnable settle = () -> {
++                if (finished[0] || web.getProgress() < 100) return; // 새로 열리는 중이면 onPageFinished 가 처리
++                web.evaluateJavascript(USER_SCRIPT, (value) -> {
++                    if (finished[0]) return;
++                    if (parseUser(value) != null) {
++                        onUser.onReceiveValue(value);
++                    } else if (!reloadedHome[0]) {
++                        reloadedHome[0] = true;
++                        web.reload();
++                    } else {
++                        main.removeCallbacks(poll[0]);
++                        cover.setVisibility(View.GONE);
++                    }
++                });
++            };
++
 +            web.setWebViewClient(new WebViewClient() {
 +                @Override
 +                public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
@@ -666,6 +685,15 @@ index 00000000..e5c4d523
 +                        main.removeCallbacks(poll[0]);
 +                        main.postDelayed(poll[0], 400);
 +                    }
++                }
++
++                @Override
++                public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
++                    // 로그인 직후 같은 페이지 안에서 엔트리 화면으로 넘어간 경우 → 덮개를 씌우고 로그인 확인
++                    if (finished[0] || !isAfterLogin(url)) return;
++                    cover.setVisibility(View.VISIBLE);
++                    main.removeCallbacks(settle);
++                    main.postDelayed(settle, 800);
 +                }
 +
 +                @Override
@@ -724,6 +752,7 @@ index 00000000..e5c4d523
 +            dialog.setOnDismissListener((d) -> {
 +                loginDialog = null;
 +                main.removeCallbacks(poll[0]);
++                main.removeCallbacks(settle);
 +                web.stopLoading();
 +                web.destroy();
 +                if (!finished[0]) {
@@ -10341,7 +10370,7 @@ diff --git a/src/renderer/components/header.scss b/src/renderer/components/heade
 index 0fa6192c..df5277c3 100644
 --- a/src/renderer/components/header.scss
 +++ b/src/renderer/components/header.scss
-@@ -366,3 +366,100 @@
+@@ -366,3 +366,83 @@
  [role='button'] {
      cursor: pointer;
  }
@@ -10356,14 +10385,7 @@ index 0fa6192c..df5277c3 100644
 +.group_box .link_workspace_text.text_work_space.no_arrow + .link_workspace_text.no_arrow {
 +    margin-left: 6px;
 +}
-+/* 톱니바퀴(설정) 아이콘 — 성능 메뉴 */
-+.group_box .link_workspace_text.btn_settings_gear {
-+    display: inline-flex;
-+    align-items: center;
-+    margin-top: 0;
-+    padding: 0 4px;
-+}
-+/* 톱니바퀴 주변 공백 제거 — 웹판처럼 아이콘 폭만큼만 차지 */
++/* 성능 메뉴(엔진 최적화·부스트·터보)는 기본형 구역 안으로 옮겨 놓는다 (header.tsx arrangeToolbar) */
 +/* 구분선: 회원가입 ↔ 한국어 사이에 선을 긋고, 한국어 ↔ 톱니바퀴 사이의 선은 없앤다 */
 +.group_inner.account_group {
 +    padding-right: 14px !important;
@@ -10392,24 +10414,14 @@ index 0fa6192c..df5277c3 100644
 +    margin: 0 !important;
 +    padding: 0 !important;
 +}
-+.group_box .link_workspace_text.btn_settings_gear {
++/* 성능 메뉴 — 기본형 바로 오른쪽, 같은 구역. "성능 ▾" 글자 버튼이며 모양은 기본형과 같다 */
++.work_space.perf_space {
++    display: inline-block;
++    vertical-align: top;
 +    width: auto !important;
 +    min-width: 0 !important;
-+    margin: 0 !important;
-+    padding: 0 6px 0 2px !important;
-+    line-height: 1;
-+}
-+.group_box .link_workspace_text.btn_settings_gear:after {
-+    display: none;
-+}
-+.group_box .link_workspace_text.btn_settings_gear svg {
-+    width: 22px;
-+    height: 22px;
-+    fill: rgba(255, 255, 255, 0.4);
-+}
-+.group_box .link_workspace_text.btn_settings_gear.on svg,
-+.group_box .link_workspace_text.btn_settings_gear:hover svg {
-+    fill: rgba(255, 255, 255, 0.7);
++    margin-left: 0 !important;
++    padding-left: 0 !important;
 +}
 +/* 출력 버튼 — 웹판처럼 흰 동그라미 */
 +.group_box .link_workspace_text.btn_print_project {
@@ -10479,7 +10491,7 @@ index e7ca0a84..859bb347 100644
      programLanguageMode: string;
      executionStatus: {
          canRedo: boolean;
-@@ -44,6 +63,73 @@ type DropDownItemPair = [string | ReactElement, string];
+@@ -44,6 +63,79 @@ type DropDownItemPair = [string | ReactElement, string];
  
  class Header extends Component<IProps, IState> {
      dropdownList: any;
@@ -10495,7 +10507,7 @@ index e7ca0a84..859bb347 100644
 +    }
 +
 +    // [entry-local] 툴바 배치를 웹판과 똑같이 맞춘다
-+    //   [파일][저장][?][출력] | 되돌리기·다시실행 | 기본형(·한국어) | 로그인 회원가입 | 설정(톱니바퀴, 맨 끝)
++    //   [파일][저장][?][출력] | 되돌리기·다시실행 | 기본형 [성능▾] | 로그인 회원가입 | 한국어
 +    private localGroups: { print: HTMLElement | null; account: HTMLElement | null; gear: HTMLElement | null } = {
 +        print: null,
 +        account: null,
@@ -10528,7 +10540,7 @@ index e7ca0a84..859bb347 100644
 +            print.style.display = 'none'; // 비어버린 구역(구분선 포함)은 숨김
 +        }
 +
-+        // 2) 로그인·회원가입: 기본형 뒤 / 한국어 앞, 톱니바퀴: 맨 끝
++        // 2) 로그인·회원가입: 기본형 뒤 / 한국어 앞
 +        const mine = [print, account, gear];
 +        const langEl: HTMLElement | null = this.dropdownList && this.dropdownList.language;
 +        let langTop: HTMLElement | null = langEl;
@@ -10542,18 +10554,24 @@ index e7ca0a84..859bb347 100644
 +        if (account && modeGroup && modeGroup.nextElementSibling !== account) {
 +            modeGroup.insertAdjacentElement('afterend', account);
 +        }
-+        const visible = Array.from(parent.children).filter(
-+            (el) => el !== gear && el !== print && (el as HTMLElement).offsetWidth > 0
-+        );
-+        const lastVisible = visible[visible.length - 1] as HTMLElement | undefined;
-+        if (lastVisible && lastVisible.nextElementSibling !== gear) {
-+            lastVisible.insertAdjacentElement('afterend', gear);
++
++        // 3) 성능 메뉴(엔진 최적화·부스트·터보): 기본형과 같은 구역 안, 기본형 바로 오른쪽
++        //    (톱니바퀴 구역은 비게 되므로 숨김)
++        const modeBox = modeGroup ? (modeGroup.querySelector('.work_space') as HTMLElement | null) : null;
++        const perfBox = gear.querySelector('.work_space') as HTMLElement | null;
++        if (modeGroup && modeBox && perfBox) {
++            if (modeBox.nextElementSibling !== perfBox) {
++                modeBox.insertAdjacentElement('afterend', perfBox);
++            }
++            modeGroup.style.width = 'auto';
++            modeGroup.style.minWidth = '0';
++            gear.style.display = 'none';
 +        }
 +    };
  
      constructor(props: Readonly<IProps>) {
          super(props);
-@@ -63,15 +149,56 @@ class Header extends Component<IProps, IState> {
+@@ -63,15 +155,56 @@ class Header extends Component<IProps, IState> {
      get fileList(): DropDownItemPair[] {
          return [
              [RendererUtils.getLang('Workspace.file_new'), 'new'],
@@ -10614,7 +10632,7 @@ index e7ca0a84..859bb347 100644
      }
  
      get helpList(): DropDownItemPair[] {
-@@ -102,6 +229,17 @@ class Header extends Component<IProps, IState> {
+@@ -102,6 +235,17 @@ class Header extends Component<IProps, IState> {
          ];
      }
  
@@ -10632,7 +10650,7 @@ index e7ca0a84..859bb347 100644
      // noti : 가지고 있는 다국어 종류는 4종류이지만, 운영빌드에서는 관리중인 2종류만 제공
      get languageList(): DropDownItemPair[] {
          return [
-@@ -192,6 +330,12 @@ class Header extends Component<IProps, IState> {
+@@ -192,6 +336,12 @@ class Header extends Component<IProps, IState> {
              case 'language':
                  this.handleChangeLanguage(item);
                  break;
@@ -10645,7 +10663,7 @@ index e7ca0a84..859bb347 100644
          }
      }
  
-@@ -393,6 +537,103 @@ class Header extends Component<IProps, IState> {
+@@ -393,6 +543,101 @@ class Header extends Component<IProps, IState> {
                          </div>
                      </div>
  
@@ -10725,11 +10743,11 @@ index e7ca0a84..859bb347 100644
 +                        </div>
 +                    )}
 +
-+                    {/* [entry-local] 성능 설정 */}
++                    {/* [entry-local] 성능 설정 — 렌더 후 기본형 구역 안으로 옮겨진다 (arrangeToolbar) */}
 +                    <div className={'group_inner gear_group'} ref={(dom) => this.setGearGroup(dom)}>
-+                        <div className={'work_space'}>
++                        <div className={'work_space perf_space'}>
 +                            <a
-+                                className={`link_workspace_text text_work_space btn_settings_gear ${
++                                className={`link_workspace_text text_work_space btn_perf_menu ${
 +                                    dropdownType === 'performance' ? 'on' : ''
 +                                }`}
 +                                title={'부스트 모드: GPU로 무대를 그립니다. 터보 모드: 블록을 더 빠르게 실행합니다.'}
@@ -10738,9 +10756,7 @@ index e7ca0a84..859bb347 100644
 +                                    this.handleDropdownClick('performance');
 +                                }}
 +                            >
-+                                <svg viewBox="-19.5 -19.5 39 39" aria-label="설정 (성능)">
-+                                    <path fillRule="evenodd" d="M-16.27 -0 -16.26 -0.28 -16.25 -0.57 -16.23 -0.85 -16.21 -1.13 -16.23 -1.42 -16.29 -1.71 -16.41 -2.01 -16.57 -2.33 -16.80 -2.66 -17.10 -3.01 -17.47 -3.40 -17.89 -3.80 -18.32 -4.23 -18.75 -4.68 -19.13 -5.13 -19.37 -5.55 -19.45 -5.95 -19.43 -6.31 -19.33 -6.66 -19.20 -6.99 -19.05 -7.31 -18.91 -7.64 -18.77 -7.97 -18.64 -8.30 -18.52 -8.63 -18.38 -8.96 -18.20 -9.27 -17.96 -9.55 -17.62 -9.77 -17.15 -9.90 -16.57 -9.96 -15.95 -9.96 -15.34 -9.96 -14.75 -9.95 -14.22 -9.96 -13.76 -10 -13.36 -10.07 -13.02 -10.18 -12.73 -10.31 -12.48 -10.47 -12.27 -10.66 -12.07 -10.87 -11.89 -11.09 -11.70 -11.30 -11.50 -11.50 -11.30 -11.70 -11.09 -11.89 -10.87 -12.07 -10.66 -12.27 -10.47 -12.48 -10.31 -12.73 -10.18 -13.02 -10.07 -13.36 -10 -13.76 -9.96 -14.22 -9.95 -14.75 -9.96 -15.34 -9.96 -15.95 -9.96 -16.57 -9.90 -17.15 -9.77 -17.62 -9.55 -17.96 -9.27 -18.20 -8.96 -18.38 -8.63 -18.52 -8.30 -18.64 -7.97 -18.77 -7.64 -18.91 -7.31 -19.05 -6.99 -19.20 -6.66 -19.33 -6.31 -19.43 -5.95 -19.45 -5.55 -19.37 -5.13 -19.13 -4.68 -18.75 -4.23 -18.32 -3.80 -17.89 -3.40 -17.47 -3.01 -17.10 -2.66 -16.80 -2.33 -16.57 -2.01 -16.41 -1.71 -16.29 -1.42 -16.23 -1.13 -16.21 -0.85 -16.23 -0.57 -16.25 -0.28 -16.26 0 -16.27 0.28 -16.26 0.57 -16.25 0.85 -16.23 1.13 -16.21 1.42 -16.23 1.71 -16.29 2.01 -16.41 2.33 -16.57 2.66 -16.80 3.01 -17.10 3.40 -17.47 3.80 -17.89 4.23 -18.32 4.68 -18.75 5.13 -19.13 5.55 -19.37 5.95 -19.45 6.31 -19.43 6.66 -19.33 6.99 -19.20 7.31 -19.05 7.64 -18.91 7.97 -18.77 8.30 -18.64 8.63 -18.52 8.96 -18.38 9.27 -18.20 9.55 -17.96 9.77 -17.62 9.90 -17.15 9.96 -16.57 9.96 -15.95 9.96 -15.34 9.95 -14.75 9.96 -14.22 10 -13.76 10.07 -13.36 10.18 -13.02 10.31 -12.73 10.47 -12.48 10.66 -12.27 10.87 -12.07 11.09 -11.89 11.30 -11.70 11.50 -11.50 11.70 -11.30 11.89 -11.09 12.07 -10.87 12.27 -10.66 12.48 -10.47 12.73 -10.31 13.02 -10.18 13.36 -10.07 13.76 -10 14.22 -9.96 14.75 -9.95 15.34 -9.96 15.95 -9.96 16.57 -9.96 17.15 -9.90 17.62 -9.77 17.96 -9.55 18.20 -9.27 18.38 -8.96 18.52 -8.63 18.64 -8.30 18.77 -7.97 18.91 -7.64 19.05 -7.31 19.20 -6.99 19.33 -6.66 19.43 -6.31 19.45 -5.95 19.37 -5.55 19.13 -5.13 18.75 -4.68 18.32 -4.23 17.89 -3.80 17.47 -3.40 17.10 -3.01 16.80 -2.66 16.57 -2.33 16.41 -2.01 16.29 -1.71 16.23 -1.42 16.21 -1.13 16.23 -0.85 16.25 -0.57 16.26 -0.28 16.27 0 16.26 0.28 16.25 0.57 16.23 0.85 16.21 1.13 16.23 1.42 16.29 1.71 16.41 2.01 16.57 2.33 16.80 2.66 17.10 3.01 17.47 3.40 17.89 3.80 18.32 4.23 18.75 4.68 19.13 5.13 19.37 5.55 19.45 5.95 19.43 6.31 19.33 6.66 19.20 6.99 19.05 7.31 18.91 7.64 18.77 7.97 18.64 8.30 18.52 8.63 18.38 8.96 18.20 9.27 17.96 9.55 17.62 9.77 17.15 9.90 16.57 9.96 15.95 9.96 15.34 9.96 14.75 9.95 14.22 9.96 13.76 10 13.36 10.07 13.02 10.18 12.73 10.31 12.48 10.47 12.27 10.66 12.07 10.87 11.89 11.09 11.70 11.30 11.50 11.50 11.30 11.70 11.09 11.89 10.87 12.07 10.66 12.27 10.47 12.48 10.31 12.73 10.18 13.02 10.07 13.36 10 13.76 9.96 14.22 9.95 14.75 9.96 15.34 9.96 15.95 9.96 16.57 9.90 17.15 9.77 17.62 9.55 17.96 9.27 18.20 8.96 18.38 8.63 18.52 8.30 18.64 7.97 18.77 7.64 18.91 7.31 19.05 6.99 19.20 6.66 19.33 6.31 19.43 5.95 19.45 5.55 19.37 5.13 19.13 4.68 18.75 4.23 18.32 3.80 17.89 3.40 17.47 3.01 17.10 2.66 16.80 2.33 16.57 2.01 16.41 1.71 16.29 1.42 16.23 1.13 16.21 0.85 16.23 0.57 16.25 0.28 16.26 0 16.27 -0.28 16.26 -0.57 16.25 -0.85 16.23 -1.13 16.21 -1.42 16.23 -1.71 16.29 -2.01 16.41 -2.33 16.57 -2.66 16.80 -3.01 17.10 -3.40 17.47 -3.80 17.89 -4.23 18.32 -4.68 18.75 -5.13 19.13 -5.55 19.37 -5.95 19.45 -6.31 19.43 -6.66 19.33 -6.99 19.20 -7.31 19.05 -7.64 18.91 -7.97 18.77 -8.30 18.64 -8.63 18.52 -8.96 18.38 -9.27 18.20 -9.55 17.96 -9.77 17.62 -9.90 17.15 -9.96 16.57 -9.96 15.95 -9.96 15.34 -9.95 14.75 -9.96 14.22 -10 13.76 -10.07 13.36 -10.18 13.02 -10.31 12.73 -10.47 12.48 -10.66 12.27 -10.87 12.07 -11.09 11.89 -11.30 11.70 -11.50 11.50 -11.70 11.30 -11.89 11.09 -12.07 10.87 -12.27 10.66 -12.48 10.47 -12.73 10.31 -13.02 10.18 -13.36 10.07 -13.76 10 -14.22 9.96 -14.75 9.95 -15.34 9.96 -15.95 9.96 -16.57 9.96 -17.15 9.90 -17.62 9.77 -17.96 9.55 -18.20 9.27 -18.38 8.96 -18.52 8.63 -18.64 8.30 -18.77 7.97 -18.91 7.64 -19.05 7.31 -19.20 6.99 -19.33 6.66 -19.43 6.31 -19.45 5.95 -19.37 5.55 -19.13 5.13 -18.75 4.68 -18.32 4.23 -17.89 3.80 -17.47 3.40 -17.10 3.01 -16.80 2.66 -16.57 2.33 -16.41 2.01 -16.29 1.71 -16.23 1.42 -16.21 1.13 -16.23 0.85 -16.25 0.57 -16.26 0.28Z M-9.36 0a9.36 9.36 0 1 0 18.72 0a9.36 9.36 0 1 0 -18.72 0Z" />
-+                                </svg>
++                                성능
 +                            </a>
 +                            {this.makeDropdown('performance', this.performanceList)}
 +                        </div>
@@ -12909,7 +12925,7 @@ new file mode 100644
 index 00000000..3108ac84
 --- /dev/null
 +++ b/src/renderer/helper/localProjectModal.ts
-@@ -0,0 +1,637 @@
+@@ -0,0 +1,647 @@
 +import IpcRendererHelper from './ipcRendererHelper';
 +import RendererUtils from './rendererUtils';
 +import EntryModalHelper from './entry/entryModalHelper';
@@ -12958,24 +12974,33 @@ index 00000000..3108ac84
 +const ROOT_ID = 'entry-local-projects';
 +
 +const CSS = `
-+#${ROOT_ID} { position: fixed; inset: 0; z-index: 8990; /* 엔트리 확인 창(9999)·알림(9000)보다 아래 */ background: rgba(0,0,0,.45);
-+  display: flex; align-items: center; justify-content: center; font-family: NanumGothic, sans-serif; }
-+#${ROOT_ID} .elp-box { width: min(920px, 92vw); height: min(640px, 86vh); background: #fff; border-radius: 12px;
-+  display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,.3); }
-+#${ROOT_ID} .elp-head { display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-bottom: 1px solid #e5e5e5; }
-+#${ROOT_ID} .elp-head h2 { margin: 0; font-size: 18px; color: #2c313d; }
-+#${ROOT_ID} .elp-tabs { display: flex; gap: 4px; flex: 1; }
-+#${ROOT_ID} .elp-tab { border: 0; background: none; padding: 6px 12px; border-radius: 16px; font-size: 14px;
-+  color: #5d6370; cursor: pointer; }
-+#${ROOT_ID} .elp-tab.on { background: #eef3ff; color: #4f80ff; font-weight: bold; }
++/* 로그인 안내창(loginAlert.ts)과 같은 모양: 파란 머리띠(제목 · 탭 · 검색 · 닫기) + 흰 본문 */
++#${ROOT_ID} { position: fixed; inset: 0; z-index: 8990; /* 엔트리 확인 창(9999)·알림(9000)보다 아래 */ background: rgba(0,0,0,.6);
++  display: flex; align-items: center; justify-content: center; font-family: inherit; }
++#${ROOT_ID} .elp-box { width: min(920px, 92vw); height: min(640px, 86vh); background: #fff; border-radius: 6px;
++  display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 6px 24px rgba(0,0,0,.25); }
++#${ROOT_ID} .elp-head { position: relative; flex: none; display: flex; align-items: center; gap: 16px; height: 56px; padding: 0 76px 0 26px;
++  box-sizing: border-box; background: #4f80ff; color: #fff; }
++#${ROOT_ID} .elp-head h2 { margin: 0; font-size: 22px; font-weight: bold; color: #fff; white-space: nowrap; }
++#${ROOT_ID} .elp-tabs { display: flex; gap: 4px; flex: 1; min-width: 0; }
++#${ROOT_ID} .elp-tab { border: 0; background: none; padding: 6px 14px; border-radius: 16px; font: inherit; font-size: 15px;
++  color: rgba(255,255,255,.8); cursor: pointer; white-space: nowrap; }
++#${ROOT_ID} .elp-tab:hover { background: rgba(255,255,255,.18); }
++#${ROOT_ID} .elp-tab.on { background: #fff; color: #4f80ff; font-weight: bold; }
 +#${ROOT_ID} .elp-spacer { flex: 1; }
-+#${ROOT_ID} .elp-head input { width: 200px; padding: 7px 10px; border: 1px solid #ccc; border-radius: 6px; }
-+#${ROOT_ID} .elp-close { border: 0; background: none; font-size: 22px; cursor: pointer; color: #666; }
++#${ROOT_ID} .elp-head input { width: 200px; height: 34px; padding: 0 12px; box-sizing: border-box; border: 0; border-radius: 4px;
++  background: #fff; color: #333; font: inherit; font-size: 14px; }
++#${ROOT_ID} .elp-close { position: absolute; top: 50%; right: 30px; width: 26px; height: 26px; margin-top: -13px; padding: 0; border: 0;
++  background: none; cursor: pointer; }
++#${ROOT_ID} .elp-close:before, #${ROOT_ID} .elp-close:after { content: ""; position: absolute; top: 50%; left: 50%; width: 26px; height: 3px;
++  margin: -1.5px 0 0 -13px; background: #fff; border-radius: 2px; }
++#${ROOT_ID} .elp-close:before { transform: rotate(45deg); }
++#${ROOT_ID} .elp-close:after { transform: rotate(-45deg); }
 +#${ROOT_ID} .elp-body { flex: 1; overflow-y: auto; padding: 16px 20px;
 +  display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; align-content: start; }
 +#${ROOT_ID} .elp-empty { grid-column: 1 / -1; text-align: center; color: #888; padding: 60px 0; line-height: 1.7; }
-+#${ROOT_ID} .elp-empty button { margin-top: 12px; padding: 8px 18px; border: 0; border-radius: 6px; background: #4f80ff;
-+  color: #fff; font-size: 14px; cursor: pointer; }
++#${ROOT_ID} .elp-empty button { margin-top: 12px; padding: 11px 24px; border: 0; border-radius: 4px; background: #4f80ff;
++  color: #fff; font-size: 16px; font-weight: bold; cursor: pointer; }
 +#${ROOT_ID} .elp-card { border: 1px solid #e3e3e3; border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; }
 +#${ROOT_ID} .elp-card.current { border-color: #4f80ff; box-shadow: 0 0 0 2px rgba(79,128,255,.25); }
 +#${ROOT_ID} .elp-thumb { aspect-ratio: 16/9; background: #f2f4f7 center/cover no-repeat; cursor: pointer; }
@@ -13071,8 +13096,9 @@ index 00000000..3108ac84
 +    tabs.append(tabLocal, tabDrive, tabEntry);
 +    const search = el('input');
 +    search.placeholder = '작품 이름 검색';
-+    const close = el('button', 'elp-close', '×');
++    const close = el('button', 'elp-close');
 +    close.title = '닫기';
++    close.setAttribute('aria-label', '닫기');
 +    head.append(title, tabs, search, close);
 +
 +    const body = el('div', 'elp-body');
@@ -13552,7 +13578,7 @@ new file mode 100644
 index 00000000..eeaef748
 --- /dev/null
 +++ b/src/renderer/helper/loginChooser.ts
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,229 @@
 +/**
 + * [entry-local] 로그인 방법 선택 창: 구글 계정 / 엔트리(네이버 계열)
 + * 고르면 'google' | 'entry', 닫으면 null.
@@ -13562,14 +13588,23 @@ index 00000000..eeaef748
 +
 +const STYLE_ID = 'entry-local-login-chooser-style';
 +const CSS = `
-+.elc-backdrop { position: fixed; inset: 0; z-index: 8990; background: rgba(0,0,0,.45);
-+  display: flex; align-items: center; justify-content: center; font-family: NanumGothic, sans-serif; }
-+.elc-box { width: min(420px, calc(100vw - 32px)); background: #fff; border-radius: 14px; padding: 26px 24px 20px;
-+  box-shadow: 0 12px 40px rgba(0,0,0,.25); box-sizing: border-box; }
-+.elc-title { margin: 0 0 6px; font-size: 20px; font-weight: 700; color: #222; text-align: center; }
-+.elc-desc { margin: 0 0 20px; font-size: 13px; color: #777; text-align: center; line-height: 1.5; }
++/* 로그인 안내창(loginAlert.ts)과 같은 모양: 파란 머리띠(제목 · 닫기) + 흰 본문 */
++.elc-backdrop { position: fixed; inset: 0; z-index: 8990; background: rgba(0,0,0,.6);
++  display: flex; align-items: center; justify-content: center; font-family: inherit; }
++.elc-box { display: flex; flex-direction: column; width: min(400px, calc(100vw - 32px)); max-height: calc(100vh - 32px);
++  background: #fff; border-radius: 6px; overflow: hidden; box-shadow: 0 6px 24px rgba(0,0,0,.25); box-sizing: border-box; }
++.elc-head { position: relative; flex: none; display: flex; align-items: center; height: 56px; padding: 0 70px 0 26px;
++  box-sizing: border-box; background: #4f80ff; color: #fff; font-size: 22px; font-weight: bold; }
++.elc-x { position: absolute; top: 50%; right: 30px; width: 26px; height: 26px; margin-top: -13px; padding: 0; border: 0;
++  background: none; cursor: pointer; }
++.elc-x:before, .elc-x:after { content: ""; position: absolute; top: 50%; left: 50%; width: 26px; height: 3px;
++  margin: -1.5px 0 0 -13px; background: #fff; border-radius: 2px; }
++.elc-x:before { transform: rotate(45deg); }
++.elc-x:after { transform: rotate(-45deg); }
++.elc-body { flex: 1; min-height: 0; overflow-y: auto; padding: 32px 24px 28px; box-sizing: border-box; }
++.elc-desc { margin: 0 0 24px; font-size: 18px; font-weight: bold; color: #333; text-align: center; line-height: 1.4; }
 +.elc-btn { display: flex; align-items: center; gap: 14px; width: 100%; box-sizing: border-box; margin: 0 0 10px;
-+  padding: 14px 16px; border-radius: 10px; border: 1px solid #dadce0; background: #fff; cursor: pointer; text-align: left;
++  padding: 14px 16px; border-radius: 4px; border: 1px solid #dadce0; background: #fff; cursor: pointer; text-align: left;
 +  font: inherit; color: #222; transition: background .15s, border-color .15s; }
 +.elc-btn:hover, .elc-btn:focus-visible { background: #f5f8ff; border-color: #4f80ff; outline: none; }
 +.elc-btn.elc-opt-entry { border-color: #16d8a3; }
@@ -13580,9 +13615,7 @@ index 00000000..eeaef748
 +.elc-icon.elc-opt-entry { background: #16d8a3; color: #fff; }
 +.elc-label { display: block; font-size: 15px; font-weight: 700; }
 +.elc-sub { display: block; margin-top: 3px; font-size: 12px; color: #888; }
-+.elc-close { display: block; margin: 8px auto 0; padding: 8px 18px; border: 0; background: none; color: #888; font: inherit;
-+  font-size: 13px; cursor: pointer; }
-+.elc-note { margin: 4px 0 0; font-size: 11px; color: #999; text-align: center; line-height: 1.5; }
++.elc-note { margin: 14px 0 0; font-size: 12px; color: #888; text-align: center; line-height: 1.5; }
 +`;
 +
 +function ensureStyle() {
@@ -13617,8 +13650,15 @@ index 00000000..eeaef748
 +        box.setAttribute('role', 'dialog');
 +        box.setAttribute('aria-modal', 'true');
 +        box.setAttribute('aria-label', '로그인 방법 선택');
-+        box.appendChild(el('h2', 'elc-title', '로그인'));
-+        box.appendChild(el('p', 'elc-desc', '어떤 계정으로 로그인할까요?'));
++        const head = el('div', 'elc-head', '로그인');
++        const x = el('button', 'elc-x');
++        x.type = 'button';
++        x.setAttribute('aria-label', '닫기');
++        head.appendChild(x);
++        box.appendChild(head);
++        const body = el('div', 'elc-body');
++        box.appendChild(body);
++        body.appendChild(el('p', 'elc-desc', '어떤 계정으로 로그인할까요?'));
 +
 +        const close = (choice: LoginChoice | null) => {
 +            document.removeEventListener('keydown', onKey, true);
@@ -13642,7 +13682,7 @@ index 00000000..eeaef748
 +            text.appendChild(el('span', 'elc-sub', sub));
 +            btn.appendChild(text);
 +            btn.addEventListener('click', () => close(choice));
-+            box.appendChild(btn);
++            body.appendChild(btn);
 +            return btn;
 +        };
 +
@@ -13652,12 +13692,9 @@ index 00000000..eeaef748
 +        }
 +        if (options.entry) {
 +            first.push(addButton('entry', 'e', '엔트리 · 네이버 계열', '엔트리 아이디 · 네이버 · 웨일 스페이스'));
-+            box.appendChild(el('p', 'elc-note', '엔트리 공식 로그인 화면이 열립니다. 비밀번호는 이 앱에 저장되지 않습니다.'));
++            body.appendChild(el('p', 'elc-note', '엔트리 공식 로그인 화면이 열립니다. 비밀번호는 이 앱에 저장되지 않습니다.'));
 +        }
-+        const cancel = el('button', 'elc-close', '닫기');
-+        cancel.type = 'button';
-+        cancel.addEventListener('click', () => close(null));
-+        box.appendChild(cancel);
++        x.addEventListener('click', () => close(null));
 +
 +        backdrop.addEventListener('mousedown', (e) => {
 +            if (e.target === backdrop) {
@@ -13678,7 +13715,7 @@ index 00000000..eeaef748
 +/* ------------------------------------------------------------------ */
 +const GUIDE_CSS = `
 +.elg-box { width: min(480px, calc(100vw - 32px)); }
-+.elg-intro { margin: 0 0 16px; font-size: 14px; color: #555; text-align: center; line-height: 1.6; }
++.elg-intro { margin: 0 0 16px; font-size: 15px; color: #555; text-align: center; line-height: 1.6; }
 +.elg-steps { list-style: none; margin: 0 0 20px; padding: 0; }
 +.elg-step { display: flex; gap: 12px; align-items: flex-start; padding: 10px 0; border-top: 1px solid #eef0f3; }
 +.elg-step:first-child { border-top: 0; }
@@ -13687,9 +13724,10 @@ index 00000000..eeaef748
 +.elg-head { display: block; font-size: 15px; font-weight: 700; color: #222; }
 +.elg-text { display: block; margin-top: 3px; font-size: 13px; color: #777; line-height: 1.5; }
 +.elg-buttons { display: flex; gap: 10px; }
-+.elg-buttons button { flex: 1; padding: 12px 0; border-radius: 8px; font: inherit; font-size: 15px; cursor: pointer; }
++.elg-buttons button { flex: 1; height: 49px; border-radius: 4px; font: inherit; font-size: 17px; font-weight: bold; cursor: pointer; }
 +.elg-cancel { border: 1px solid #4f80ff; background: #fff; color: #4f80ff; }
-+.elg-ok { border: 1px solid #4f80ff; background: #4f80ff; color: #fff; font-weight: 700; }
++.elg-ok { border: 1px solid #4f80ff; background: #4f80ff; color: #fff; }
++.elg-ok:active { background: #3f6fe8; }
 +`;
 +
 +export function showGuideDialog(options: {
@@ -13712,9 +13750,16 @@ index 00000000..eeaef748
 +        box.setAttribute('role', 'dialog');
 +        box.setAttribute('aria-modal', 'true');
 +        box.setAttribute('aria-label', options.title);
-+        box.appendChild(el('h2', 'elc-title', options.title));
++        const head = el('div', 'elc-head', options.title);
++        const x = el('button', 'elc-x');
++        x.type = 'button';
++        x.setAttribute('aria-label', '닫기');
++        head.appendChild(x);
++        box.appendChild(head);
++        const body = el('div', 'elc-body');
++        box.appendChild(body);
 +        if (options.intro) {
-+            box.appendChild(el('p', 'elg-intro', options.intro));
++            body.appendChild(el('p', 'elg-intro', options.intro));
 +        }
 +        const list = el('ol', 'elg-steps');
 +        options.steps.forEach(([head, text], i) => {
@@ -13728,7 +13773,7 @@ index 00000000..eeaef748
 +            item.appendChild(body);
 +            list.appendChild(item);
 +        });
-+        box.appendChild(list);
++        body.appendChild(list);
 +
 +        const buttons = el('div', 'elg-buttons');
 +        const cancel = el('button', 'elg-cancel', options.cancelLabel || '취소');
@@ -13736,7 +13781,7 @@ index 00000000..eeaef748
 +        cancel.type = 'button';
 +        ok.type = 'button';
 +        buttons.append(cancel, ok);
-+        box.appendChild(buttons);
++        body.appendChild(buttons);
 +
 +        const close = (value: boolean) => {
 +            document.removeEventListener('keydown', onKey, true);
@@ -13750,6 +13795,7 @@ index 00000000..eeaef748
 +            }
 +        };
 +        cancel.addEventListener('click', () => close(false));
++        x.addEventListener('click', () => close(false));
 +        ok.addEventListener('click', () => close(true));
 +        backdrop.addEventListener('mousedown', (e) => {
 +            if (e.target === backdrop) {
