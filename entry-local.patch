@@ -468,7 +468,7 @@ new file mode 100644
 index 00000000..e5c4d523
 --- /dev/null
 +++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
-@@ -0,0 +1,779 @@
+@@ -0,0 +1,833 @@
 +package biz.softline.entrylocal;
 +
 +import android.app.Dialog;
@@ -547,13 +547,13 @@ index 00000000..e5c4d523
 +     */
 +    private static final String HIDE_CHROME_SCRIPT =
 +        "(() => {" +
-+        " if (window.__elHideChrome) { window.__elHideChrome(); return; }" +
++        " if (window.__elHideChrome) return window.__elHideChrome();" +
 +        " const NAV = ['생각하기', '만들기', '공유하기', '챌린지', '커뮤니티'];" +
 +        " const hide = (el) => { if (el && el.style.display !== 'none') el.style.setProperty('display', 'none', 'important'); };" +
 +        " const run = () => {" +
-+        "  if (location.pathname.indexOf('/signin') !== 0) return;" +
++        "  if (location.pathname.indexOf('/signin') !== 0) return true;" +
 +        "  const pw = document.querySelector('input[type=password], input[autocomplete*=password]');" +
-+        "  if (!pw) return;" +
++        "  if (!pw) return false;" +
 +        "  document.querySelectorAll('header, footer').forEach((el) => {" +
 +        "   if (!el.contains(pw) && el.querySelector('a, img, svg')) hide(el);" +
 +        "  });" +
@@ -563,12 +563,12 @@ index 00000000..e5c4d523
 +        "   while (n.parentElement && !n.parentElement.contains(pw)) n = n.parentElement;" +
 +        "   if (n !== document.body && n !== document.documentElement) hide(n);" +
 +        "  });" +
++        "  return true;" +
 +        " };" +
-+        " let timer = 0;" +
-+        " const later = () => { if (!timer) timer = setTimeout(() => { timer = 0; run(); }, 50); };" +
 +        " window.__elHideChrome = run;" +
-+        " const start = () => { run(); new MutationObserver(later).observe(document.documentElement, { childList: true, subtree: true }); };" +
-+        " if (document.documentElement) start(); else document.addEventListener('DOMContentLoaded', start);" +
++        // MutationObserver 콜백은 화면을 그리기 전에 실행되므로, 바로 호출해야 다시 그려질 때 머리말이 번쩍이지 않는다
++        " const start = () => { const ok = run(); new MutationObserver(run).observe(document.documentElement, { childList: true, subtree: true }); return ok; };" +
++        " if (document.documentElement) return start(); document.addEventListener('DOMContentLoaded', start); return false;" +
 +        "})()";
 +
 +    private Dialog loginDialog;
@@ -588,8 +588,25 @@ index 00000000..e5c4d523
 +
 +    /** 엔트리 로그인 화면이면 머리말·바닥글 숨김 스크립트를 실행 (네이버·웨일 로그인 화면은 건드리지 않음) */
 +    private static void hideChrome(WebView view, String url) {
-+        if (url == null || !isEntryHost(Uri.parse(url))) return;
-+        view.evaluateJavascript(HIDE_CHROME_SCRIPT, null);
++        hideChrome(view, url, null);
++    }
++
++    /** onDone(true): 머리말을 숨겼거나 숨길 필요가 없는 화면 / false: 아직 비밀번호 칸이 안 그려짐 */
++    private static void hideChrome(WebView view, String url, ValueCallback<Boolean> onDone) {
++        if (url == null || !isEntryHost(Uri.parse(url))) {
++            if (onDone != null) onDone.onReceiveValue(true);
++            return;
++        }
++        view.evaluateJavascript(HIDE_CHROME_SCRIPT, (value) -> {
++            if (onDone != null) onDone.onReceiveValue("true".equals(value));
++        });
++    }
++
++    private static boolean isEntrySignin(String url) {
++        if (url == null) return false;
++        Uri uri = Uri.parse(url);
++        String path = uri.getPath() == null ? "" : uri.getPath();
++        return isEntryHost(uri) && path.startsWith("/signin");
 +    }
 +
 +    /** evaluateJavascript 결과("null" 또는 JSON 객체 문자열)를 사용자 정보로 */
@@ -675,7 +692,27 @@ index 00000000..e5c4d523
 +            cover.setClickable(true);
 +            cover.setVisibility(View.GONE);
 +            holder.addView(cover, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
++            // 엔트리 로그인 화면이 열리는 동안 머리말이 번쩍이지 않도록, 머리말을 숨길 때까지 하얗게 가려 두는 막
++            final View veil = new View(getContext());
++            veil.setBackgroundColor(Color.WHITE);
++            veil.setClickable(true);
++            veil.setVisibility(View.VISIBLE); // 첫 화면(/signin)이 열리기 전부터 가린다
++            holder.addView(veil, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 +            root.addView(holder, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
++
++            // 머리말 숨김을 확인한 뒤 막을 걷는다. 비밀번호 칸이 아직 없으면 0.1초마다 최대 3초 다시 시도
++            final int[] veilTries = { 0 };
++            final Runnable[] unveil = new Runnable[1];
++            unveil[0] = () -> {
++                if (veil.getVisibility() != View.VISIBLE) return;
++                hideChrome(web, web.getUrl(), (done) -> {
++                    if (done || ++veilTries[0] >= 30) {
++                        main.postDelayed(() -> veil.setVisibility(View.GONE), 60); // 숨김이 실제로 그려질 한 프레임 여유
++                    } else {
++                        main.postDelayed(unveil[0], 100);
++                    }
++                });
++            };
 +
 +            // 사용자 정보를 읽어 보고 있으면 바로 끝낸다 (페이지가 다 열리기 전에도 0.4초마다)
 +            final Runnable[] poll = new Runnable[1];
@@ -720,10 +757,20 @@ index 00000000..e5c4d523
 +                @Override
 +                public void onPageCommitVisible(WebView view, String url) {
 +                    hideChrome(view, url);
++                    if (isEntrySignin(url)) {
++                        veilTries[0] = 0;
++                        main.removeCallbacks(unveil[0]);
++                        main.post(unveil[0]);
++                    } else {
++                        veil.setVisibility(View.GONE); // 네이버·웨일 로그인 화면은 그대로 보여 준다
++                    }
 +                }
 +
 +                @Override
 +                public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
++                    if (isEntrySignin(url)) {
++                        veil.setVisibility(View.VISIBLE); // 다시 /signin 으로 돌아올 때도 가린다
++                    }
 +                    if (!finished[0] && isAfterLogin(url)) {
 +                        cover.setVisibility(View.VISIBLE);
 +                        main.removeCallbacks(poll[0]);
@@ -765,6 +812,12 @@ index 00000000..e5c4d523
 +                @Override
 +                public void onPageFinished(final WebView view, String url) {
 +                    hideChrome(view, url);
++                    if (isEntrySignin(url)) {
++                        main.removeCallbacks(unveil[0]);
++                        main.post(unveil[0]);
++                    } else {
++                        veil.setVisibility(View.GONE);
++                    }
 +                    if (finished[0] || !isAfterLogin(url)) return;
 +                    view.evaluateJavascript(USER_SCRIPT, (value) -> {
 +                        if (finished[0]) return;
@@ -799,6 +852,7 @@ index 00000000..e5c4d523
 +                loginDialog = null;
 +                main.removeCallbacks(poll[0]);
 +                main.removeCallbacks(settle);
++                main.removeCallbacks(unveil[0]);
 +                web.stopLoading();
 +                web.destroy();
 +                if (!finished[0]) {
