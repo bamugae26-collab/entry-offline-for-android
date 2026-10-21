@@ -468,7 +468,7 @@ new file mode 100644
 index 00000000..e5c4d523
 --- /dev/null
 +++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
-@@ -0,0 +1,760 @@
+@@ -0,0 +1,779 @@
 +package biz.softline.entrylocal;
 +
 +import android.app.Dialog;
@@ -506,6 +506,7 @@ index 00000000..e5c4d523
 +import android.webkit.WebView;
 +import android.webkit.WebViewClient;
 +import android.widget.Button;
++import android.widget.ProgressBar;
 +import android.widget.LinearLayout;
 +import android.widget.TextView;
 +import com.getcapacitor.JSObject;
@@ -1005,29 +1006,38 @@ index 00000000..e5c4d523
 +            Dialog dialog = new Dialog(getActivity(), android.R.style.Theme_Material_Light_NoActionBar);
 +            dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
 +
-+            LinearLayout root = new LinearLayout(getContext());
-+            root.setOrientation(LinearLayout.VERTICAL);
++            FrameLayout root = new FrameLayout(getContext());
 +            root.setBackgroundColor(Color.WHITE);
-+            LinearLayout bar = new LinearLayout(getContext());
-+            bar.setOrientation(LinearLayout.HORIZONTAL);
-+            bar.setGravity(Gravity.CENTER_VERTICAL);
-+            bar.setPadding(dp(16), dp(6), dp(8), dp(6));
-+            bar.setBackgroundColor(Color.parseColor("#2C3550"));
-+            TextView text = new TextView(getContext());
-+            text.setText(help);
-+            text.setTextColor(Color.WHITE);
-+            text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-+            bar.addView(text, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-+            Button close = new Button(getContext(), null, android.R.attr.borderlessButtonStyle);
-+            close.setText("닫기");
-+            close.setTextColor(Color.WHITE);
-+            bar.addView(close);
-+            root.addView(bar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 +
 +            final WebView web = new WebView(getContext());
 +            configure(web);
 +            web.getSettings().setUserAgentString(web.getSettings().getUserAgentString().replace("; wv", ""));
-+            root.addView(web, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
++            root.addView(web, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
++
++            // 엔트리 화면은 가려 두고, 진행 상태와 [취소]만 보여 준다 (자동으로 저장되면 창이 닫힌다)
++            LinearLayout overlay = new LinearLayout(getContext());
++            overlay.setOrientation(LinearLayout.VERTICAL);
++            overlay.setGravity(Gravity.CENTER);
++            overlay.setBackgroundColor(Color.WHITE);
++            overlay.setPadding(dp(32), dp(32), dp(32), dp(32));
++            overlay.setClickable(true);
++            ProgressBar spinner = new ProgressBar(getContext());
++            overlay.addView(spinner, new LinearLayout.LayoutParams(dp(48), dp(48)));
++            TextView text = new TextView(getContext());
++            text.setText(help);
++            text.setTextColor(Color.parseColor("#2C3550"));
++            text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
++            text.setGravity(Gravity.CENTER);
++            LinearLayout.LayoutParams textLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
++            textLp.topMargin = dp(20);
++            overlay.addView(text, textLp);
++            Button close = new Button(getContext(), null, android.R.attr.borderlessButtonStyle);
++            close.setText("취소");
++            close.setTextColor(Color.parseColor("#4F80FF"));
++            LinearLayout.LayoutParams closeLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
++            closeLp.topMargin = dp(24);
++            overlay.addView(close, closeLp);
++            root.addView(overlay, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 +            web.setWebChromeClient(new WebChromeClient() {
 +                @Override
 +                public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
@@ -1051,6 +1061,12 @@ index 00000000..e5c4d523
 +            final String[] phase = { "import" };
 +            final long[] phaseAt = { SystemClock.uptimeMillis() };
 +            final boolean[] triedSaveClick = { false };
++            final boolean[] failed = { false };
++            final Runnable fail = () -> {
++                // 자동으로 못 끝냄: 창을 닫고 실패로 돌려준다 (앱에서 다시 시도 안내)
++                failed[0] = true;
++                dialog.dismiss();
++            };
 +            final Runnable[] tick = new Runnable[1];
 +            final java.util.function.BiConsumer<String, String> go = (next, key) -> {
 +                phase[0] = next;
@@ -1097,7 +1113,7 @@ index 00000000..e5c4d523
 +                        if (st.optBoolean("saved")) {
 +                            saved[0] = true;
 +                            go.accept("done", "done");
-+                            main.postDelayed(dialog::dismiss, 1500);
++                            main.postDelayed(dialog::dismiss, 500);
 +                            return;
 +                        }
 +                        switch (phase[0]) {
@@ -1109,17 +1125,18 @@ index 00000000..e5c4d523
 +                                    tap.accept(at, dpr);
 +                                    go.accept("loading", "importing");
 +                                } else if (waited > (st.optBoolean("ready") ? 12000 : 40000)) {
-+                                    go.accept("manual", "manualImport");
++                                    fail.run();
++                                    return;
 +                                }
 +                                break;
 +                            }
 +                            case "loading":
-+                            case "manual":
 +                                if (loaded) {
 +                                    main.postDelayed(ctrlS, 800);
 +                                    go.accept("saving", "saving");
-+                                } else if ("loading".equals(phase[0]) && waited > 30000) {
-+                                    go.accept("manual", "manualImport");
++                                } else if (waited > 30000) {
++                                    fail.run();
++                                    return;
 +                                }
 +                                break;
 +                            case "saving": {
@@ -1127,8 +1144,9 @@ index 00000000..e5c4d523
 +                                if (waited > 6000 && !triedSaveClick[0] && at != null) {
 +                                    triedSaveClick[0] = true;
 +                                    tap.accept(at, dpr);
-+                                } else if (waited > 15000) {
-+                                    go.accept("waitUser", "manualSave");
++                                } else if (waited > 45000) {
++                                    fail.run();
++                                    return;
 +                                }
 +                                break;
 +                            }
@@ -1174,6 +1192,7 @@ index 00000000..e5c4d523
 +                JSObject r = new JSObject();
 +                r.put("projectId", projectId[0]);
 +                r.put("saved", saved[0]);
++                r.put("failed", failed[0] && !saved[0]);
 +                call.resolve(r);
 +            });
 +            dialog.setContentView(root);
@@ -10954,7 +10973,7 @@ index 32eb38dd..78d1d265 100644
              Object.assign(project, option);
              LocalStorageManager.saveProject(project);
          }
-@@ -438,78 +518,439 @@ class Workspace extends Component<IProps> {
+@@ -438,78 +518,438 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -11001,9 +11020,9 @@ index 32eb38dd..78d1d265 100644
 +    };
 +
 +    /**
-+     * [entry-local] 엔트리 계정에 저장 (반자동)
-+     * 엔트리 작업 화면을 앱 안 창에 열고 지금 작품 파일을 '오프라인 작품 불러오기'에 자동으로 넣어 준다.
-+     * 사용자가 엔트리 화면의 [저장하기]를 누르면 계정에 저장된다.
++     * [entry-local] 엔트리 계정에 저장 (자동)
++     * 엔트리 작업 화면을 가려 둔 채 앱이 불러오기·저장하기를 대신 눌러 준다.
++     * 한 번 누르면 저장이 끝날 때까지 기다렸다가(진행 화면) 자동으로 편집 화면으로 돌아온다.
 +     */
 +    saveToEntry = async () => {
 +        if (this.isSaveProject) {
@@ -11015,9 +11034,6 @@ index 32eb38dd..78d1d265 100644
 +            return;
 +        }
 +        if (!state.entry) {
-+            if (!(await EntryModalHelper.getConfirmModal('엔트리 계정에 저장하려면 엔트리 로그인이 필요합니다.\n지금 로그인할까요?'))) {
-+                return;
-+            }
 +            if (!(await this.handleAccountAction('login_entry'))) {
 +                return;
 +            }
@@ -11038,8 +11054,10 @@ index 32eb38dd..78d1d265 100644
 +            }
 +            if (result && result.saved) {
 +                notify('엔트리 계정에 저장됨', name);
++            } else if (result && result.failed) {
++                EntryModalHelper.getAlertModal('엔트리 계정에 저장하지 못했습니다.\n작품은 그대로 있으니 잠시 후 다시 시도해 주세요.');
 +            } else {
-+                notify('엔트리 계정', '저장하지 않고 엔트리 창을 닫았습니다.');
++                notify('엔트리 계정', '저장을 취소했습니다.');
 +            }
 +        } catch (err) {
 +            console.error(err);
@@ -11446,7 +11464,7 @@ index 32eb38dd..78d1d265 100644
      };
  
      handleFileAction = async (type: string) => {
-@@ -518,6 +959,10 @@ class Workspace extends Component<IProps> {
+@@ -518,6 +958,10 @@ class Workspace extends Component<IProps> {
                  await RendererUtils.clearTempProject();
                  await this.loadProject();
              }
@@ -11457,7 +11475,7 @@ index 32eb38dd..78d1d265 100644
          } else if (type === 'open_offline') {
              this._loadProjectFromFile(
                  () =>
-@@ -576,11 +1021,33 @@ class Workspace extends Component<IProps> {
+@@ -576,11 +1020,33 @@ class Workspace extends Component<IProps> {
          let projectWorkspaceMode = currentWorkspaceMode;
  
          if (project) {
@@ -11491,7 +11509,7 @@ index 32eb38dd..78d1d265 100644
              delete this.projectSavedPath;
              delete this.projectParent;
              CommonActions.changeProjectName(RendererUtils.getDefaultProjectName());
-@@ -602,8 +1069,14 @@ class Workspace extends Component<IProps> {
+@@ -602,8 +1068,14 @@ class Workspace extends Component<IProps> {
          }
          Entry.reloadBlock();
          this.isFirstRender = false;
@@ -11506,7 +11524,7 @@ index 32eb38dd..78d1d265 100644
          try {
              if (project) {
                  await Entry.loadExternalModules(project);
-@@ -633,9 +1106,38 @@ class Workspace extends Component<IProps> {
+@@ -633,9 +1105,38 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -11545,7 +11563,7 @@ index 32eb38dd..78d1d265 100644
          await this.loadProject(project);
      };
  
-@@ -717,6 +1219,8 @@ class Workspace extends Component<IProps> {
+@@ -717,6 +1218,8 @@ class Workspace extends Component<IProps> {
                          onFileAction={this.handleFileAction}
                          onReloadProject={this.reloadProject}
                          onLoadProject={this.loadProject}
@@ -11716,7 +11734,7 @@ index 00000000..833bf0d3
 +        window.ipcInvoke<{ total: number; list: EntryProjectMeta[] }>('entry:projects', start, display),
 +    load: (projectId: string, name: string) => window.ipcInvoke<any>('entry:load', projectId, name),
 +    saveViaSite: (project: any, options: { entryProjectId?: string; name: string }) =>
-+        window.ipcInvoke<{ projectId?: string; saved?: boolean }>('entry:saveViaSite', project, options),
++        window.ipcInvoke<{ projectId?: string; saved?: boolean; failed?: boolean }>('entry:saveViaSite', project, options),
 +};
 +
 +export const accountApi = {
@@ -14198,15 +14216,13 @@ new file mode 100644
 index 00000000..432d84af
 --- /dev/null
 +++ b/src/web/entryAccountWeb.ts
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,191 @@
 +import { registerPlugin } from '@capacitor/core';
 +import {
 +    EntryStatus,
 +    EntryUser,
 +    ENTRY_HOME_URL,
 +    ENTRY_ORIGIN,
-+    SAVE_VIA_SITE_HELP,
-+    AUTO_SAVE_TEXT,
 +    autoSaveProbeScript,
 +    entryProfileUrl,
 +    entryWorkspaceUrl,
@@ -14238,10 +14254,14 @@ index 00000000..432d84af
 +        probe?: string;
 +        probeMenu?: string;
 +        texts?: { [key: string]: string };
-+    }): Promise<{ projectId?: string; saved?: boolean }>;
++    }): Promise<{ projectId?: string; saved?: boolean; failed?: boolean }>;
 +}
 +
 +const EntryAccount = registerPlugin<EntryAccountPlugin>('EntryAccount');
++
++/** 계정 저장 중 보여 주는 문구 (한 번 누르면 자동으로 끝까지 진행) */
++const SAVING_TEXT = '엔트리 계정에 저장하는 중…';
++const SAVE_TEXTS = { start: SAVING_TEXT, importing: SAVING_TEXT, saving: SAVING_TEXT, done: '저장했습니다.' };
 +const KEY = 'entryLocalEntryAccount';
 +
 +let user: EntryUser | undefined = (() => {
@@ -14376,13 +14396,17 @@ index 00000000..432d84af
 +        url: entryWorkspaceUrl(options.entryProjectId),
 +        ent: btoa(bin),
 +        fileName: 'entry-local-project.ent', // 영문 이름 (작품 이름은 .ent 안에 들어 있음)
-+        help: SAVE_VIA_SITE_HELP,
++        help: SAVING_TEXT,
 +        projectId: options.entryProjectId,
 +        probe: autoSaveProbeScript(false),
 +        probeMenu: autoSaveProbeScript(true),
-+        texts: AUTO_SAVE_TEXT,
++        texts: SAVE_TEXTS,
 +    });
-+    return { projectId: (res && res.projectId) || options.entryProjectId || undefined, saved: !!(res && res.saved) };
++    return {
++        projectId: (res && res.projectId) || options.entryProjectId || undefined,
++        saved: !!(res && res.saved),
++        failed: !!(res && res.failed),
++    };
 +}
 diff --git a/src/web/media.ts b/src/web/media.ts
 new file mode 100644
