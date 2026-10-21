@@ -10341,7 +10341,7 @@ diff --git a/src/renderer/components/header.scss b/src/renderer/components/heade
 index 0fa6192c..df5277c3 100644
 --- a/src/renderer/components/header.scss
 +++ b/src/renderer/components/header.scss
-@@ -366,3 +366,84 @@
+@@ -366,3 +366,100 @@
  [role='button'] {
      cursor: pointer;
  }
@@ -10364,6 +10364,22 @@ index 0fa6192c..df5277c3 100644
 +    padding: 0 4px;
 +}
 +/* 톱니바퀴 주변 공백 제거 — 웹판처럼 아이콘 폭만큼만 차지 */
++/* 구분선: 회원가입 ↔ 한국어 사이에 선을 긋고, 한국어 ↔ 톱니바퀴 사이의 선은 없앤다 */
++.group_inner.account_group {
++    padding-right: 14px !important;
++    margin-right: -6px !important;
++    background: linear-gradient(#fff, #fff) no-repeat right center / 1px 16px;
++}
++.group_inner.gear_group,
++.group_inner.gear_group:before,
++.group_inner.gear_group:after {
++    border-left: 0 !important;
++}
++.group_inner.gear_group:before,
++.group_inner.gear_group:after {
++    content: none !important;
++    display: none !important;
++}
 +.group_inner.gear_group {
 +    width: auto !important;
 +    min-width: 0 !important;
@@ -10430,12 +10446,13 @@ diff --git a/src/renderer/components/header.tsx b/src/renderer/components/header
 index e7ca0a84..859bb347 100644
 --- a/src/renderer/components/header.tsx
 +++ b/src/renderer/components/header.tsx
-@@ -12,6 +12,22 @@ import ImportToggleHelper from '../helper/importToggleHelper';
+@@ -12,6 +12,23 @@ import ImportToggleHelper from '../helper/importToggleHelper';
  import { IStoreState } from '../store/modules';
  import { IMapDispatchToProps, IMapStateToProps } from '../store';
  import styled from 'styled-components';
 +import { getPerformanceSettings } from '../helper/entry/performance';
 +import { openPrintView } from '../helper/printProject';
++import { showLoginAlert } from '../helper/loginAlert';
 +import { accountLabel, accountsAvailable, cloudAvailable, cloudReady, getCloudState, subscribeCloud } from '../helper/cloudState';
 +
 +// [entry-local] 계정 메뉴 동작
@@ -10453,7 +10470,7 @@ index e7ca0a84..859bb347 100644
  
  const FoundationLabel = styled.span`
      float: left;
-@@ -33,6 +49,8 @@ interface IProps extends IReduxDispatch, IReduxState {
+@@ -33,6 +50,8 @@ interface IProps extends IReduxDispatch, IReduxState {
      onProgramLanguageChanged: (key: string) => void;
      onLoadProject: () => void;
      onReloadProject: () => void;
@@ -10462,7 +10479,7 @@ index e7ca0a84..859bb347 100644
      programLanguageMode: string;
      executionStatus: {
          canRedo: boolean;
-@@ -44,6 +62,73 @@ type DropDownItemPair = [string | ReactElement, string];
+@@ -44,6 +63,73 @@ type DropDownItemPair = [string | ReactElement, string];
  
  class Header extends Component<IProps, IState> {
      dropdownList: any;
@@ -10536,7 +10553,7 @@ index e7ca0a84..859bb347 100644
  
      constructor(props: Readonly<IProps>) {
          super(props);
-@@ -63,15 +148,56 @@ class Header extends Component<IProps, IState> {
+@@ -63,15 +149,56 @@ class Header extends Component<IProps, IState> {
      get fileList(): DropDownItemPair[] {
          return [
              [RendererUtils.getLang('Workspace.file_new'), 'new'],
@@ -10597,7 +10614,7 @@ index e7ca0a84..859bb347 100644
      }
  
      get helpList(): DropDownItemPair[] {
-@@ -102,6 +228,17 @@ class Header extends Component<IProps, IState> {
+@@ -102,6 +229,17 @@ class Header extends Component<IProps, IState> {
          ];
      }
  
@@ -10615,7 +10632,7 @@ index e7ca0a84..859bb347 100644
      // noti : 가지고 있는 다국어 종류는 4종류이지만, 운영빌드에서는 관리중인 2종류만 제공
      get languageList(): DropDownItemPair[] {
          return [
-@@ -192,6 +329,12 @@ class Header extends Component<IProps, IState> {
+@@ -192,6 +330,12 @@ class Header extends Component<IProps, IState> {
              case 'language':
                  this.handleChangeLanguage(item);
                  break;
@@ -10628,7 +10645,7 @@ index e7ca0a84..859bb347 100644
          }
      }
  
-@@ -393,6 +536,97 @@ class Header extends Component<IProps, IState> {
+@@ -393,6 +537,103 @@ class Header extends Component<IProps, IState> {
                          </div>
                      </div>
  
@@ -10639,6 +10656,12 @@ index e7ca0a84..859bb347 100644
 +                                className={'link_workspace_text btn_print_project'}
 +                                title={'출력하기'}
 +                                onClick={() => {
++                                    // 로그인(엔트리 계정 또는 구글) 후에만 출력할 수 있다
++                                    const cloud = getCloudState();
++                                    if (!(cloud.loggedIn || cloud.entry)) {
++                                        showLoginAlert(() => this.props.onAccountAction('login'));
++                                        return;
++                                    }
 +                                    openPrintView(((this.props as any).common || {}).projectName);
 +                                }}
 +                            >
@@ -10651,7 +10674,7 @@ index e7ca0a84..859bb347 100644
 +
 +                    {/* [entry-local] 계정(엔트리·구글): 인터넷이 연결되어 있을 때만 */}
 +                    {accountsAvailable() && (
-+                        <div className={'group_inner'} ref={(dom) => (this.localGroups.account = dom)}>
++                        <div className={'group_inner account_group'} ref={(dom) => (this.localGroups.account = dom)}>
 +                            <div className={'work_space'}>
 +                                {getCloudState().loggedIn || getCloudState().entry ? (
 +                                    <a
@@ -16447,3 +16470,76 @@ index 00000000..635dee76
 +    performance: { hints: false },
 +    plugins: [new CleanWebpackPlugin(), new ExtractTextPlugin('bundle.css')],
 +};
+diff --git a/src/renderer/helper/loginAlert.ts b/src/renderer/helper/loginAlert.ts
+new file mode 100644
+index 00000000..7d1e3a5c
+--- /dev/null
++++ b/src/renderer/helper/loginAlert.ts
+@@ -0,0 +1,67 @@
++/**
++ * [entry-local] "로그인 후 이용할 수 있습니다." 알림창
++ * 웹판 엔트리(playentry.org)의 알림창과 같은 모양: 파란 머리띠(알림 · 닫기) + 안내 문구 + 로그인 버튼
++ */
++const OVERLAY_ID = 'entry-local-login-alert';
++const STYLE_ID = 'entry-local-login-alert-style';
++
++const CSS = `
++#${OVERLAY_ID}{position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);font-family:inherit}
++#${OVERLAY_ID} .ela-box{width:400px;max-width:calc(100vw - 32px);background:#fff;border-radius:6px;overflow:hidden;box-shadow:0 6px 24px rgba(0,0,0,.25)}
++#${OVERLAY_ID} .ela-head{position:relative;display:flex;align-items:center;height:56px;padding:0 26px;background:#4f80ff;color:#fff;font-size:22px;font-weight:bold}
++#${OVERLAY_ID} .ela-close{position:absolute;top:50%;right:30px;width:26px;height:26px;margin-top:-13px;padding:0;border:0;background:none;cursor:pointer}
++#${OVERLAY_ID} .ela-close:before,#${OVERLAY_ID} .ela-close:after{content:"";position:absolute;top:50%;left:50%;width:26px;height:3px;margin:-1.5px 0 0 -13px;background:#fff;border-radius:2px}
++#${OVERLAY_ID} .ela-close:before{transform:rotate(45deg)}
++#${OVERLAY_ID} .ela-close:after{transform:rotate(-45deg)}
++#${OVERLAY_ID} .ela-body{padding:36px 24px 36px;text-align:center}
++#${OVERLAY_ID} .ela-msg{margin:0 0 36px;color:#333;font-size:20px;font-weight:bold;line-height:1.4}
++#${OVERLAY_ID} .ela-ok{width:152px;height:49px;border:0;border-radius:4px;background:#4f80ff;color:#fff;font-size:19px;font-weight:bold;cursor:pointer}
++#${OVERLAY_ID} .ela-ok:active{background:#3f6fe8}
++`;
++
++function ensureStyle() {
++    if (document.getElementById(STYLE_ID)) {
++        return;
++    }
++    const style = document.createElement('style');
++    style.id = STYLE_ID;
++    style.textContent = CSS;
++    document.head.appendChild(style);
++}
++
++export function closeLoginAlert() {
++    const overlay = document.getElementById(OVERLAY_ID);
++    if (overlay && overlay.parentElement) {
++        overlay.parentElement.removeChild(overlay);
++    }
++    document.removeEventListener('keydown', onKeyDown, true);
++}
++
++function onKeyDown(event: KeyboardEvent) {
++    if (event.key === 'Escape') {
++        closeLoginAlert();
++    }
++}
++
++/** 알림창을 띄운다. 로그인 버튼을 누르면 창을 닫고 onLogin 을 호출한다. */
++export function showLoginAlert(onLogin?: () => void, message = '로그인 후 이용할 수 있습니다.') {
++    ensureStyle();
++    closeLoginAlert();
++    const overlay = document.createElement('div');
++    overlay.id = OVERLAY_ID;
++    overlay.innerHTML =
++        '<div class="ela-box" role="alertdialog" aria-modal="true">' +
++        '<div class="ela-head">알림<button class="ela-close" type="button" aria-label="닫기"></button></div>' +
++        '<div class="ela-body"><p class="ela-msg"></p><button class="ela-ok" type="button">로그인</button></div>' +
++        '</div>';
++    (overlay.querySelector('.ela-msg') as HTMLElement).textContent = message;
++    (overlay.querySelector('.ela-close') as HTMLElement).onclick = closeLoginAlert;
++    (overlay.querySelector('.ela-ok') as HTMLElement).onclick = () => {
++        closeLoginAlert();
++        if (onLogin) {
++            onLogin();
++        }
++    };
++    document.body.appendChild(overlay);
++    document.addEventListener('keydown', onKeyDown, true);
++}
