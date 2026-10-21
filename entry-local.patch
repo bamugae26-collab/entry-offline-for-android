@@ -468,7 +468,7 @@ new file mode 100644
 index 00000000..e5c4d523
 --- /dev/null
 +++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
-@@ -0,0 +1,715 @@
+@@ -0,0 +1,760 @@
 +package biz.softline.entrylocal;
 +
 +import android.app.Dialog;
@@ -538,6 +538,38 @@ index 00000000..e5c4d523
 +        " return { id: String(id), username: String(u.username || ''), nickname: String(u.nickname || u.username || '') };" +
 +        " } catch (e) { return null; } })()";
 +
++    /**
++     * 로그인 화면에서 엔트리·네이버 커넥트 머리말(로고, 생각하기/만들기/… 메뉴, 검색, 로그인 버튼)과
++     * 바닥글을 숨긴다. 로그인 창을 벗어나 엔트리 사이트를 돌아다니는 것(탈주)을 막기 위한 것.
++     * 클래스 이름에 기대지 않고, 비밀번호 칸과 메뉴 글자 위치만으로 머리말 덩어리를 찾는다.
++     * 화면이 다시 그려져도 계속 숨기도록 MutationObserver 를 한 번만 붙인다.
++     */
++    private static final String HIDE_CHROME_SCRIPT =
++        "(() => {" +
++        " if (window.__elHideChrome) { window.__elHideChrome(); return; }" +
++        " const NAV = ['생각하기', '만들기', '공유하기', '챌린지', '커뮤니티'];" +
++        " const hide = (el) => { if (el && el.style.display !== 'none') el.style.setProperty('display', 'none', 'important'); };" +
++        " const run = () => {" +
++        "  if (location.pathname.indexOf('/signin') !== 0) return;" +
++        "  const pw = document.querySelector('input[type=password], input[autocomplete*=password]');" +
++        "  if (!pw) return;" +
++        "  document.querySelectorAll('header, footer').forEach((el) => {" +
++        "   if (!el.contains(pw) && el.querySelector('a, img, svg')) hide(el);" +
++        "  });" +
++        "  document.querySelectorAll('a, button, li, span, div').forEach((el) => {" +
++        "   if (el.children.length || NAV.indexOf((el.textContent || '').trim()) < 0) return;" +
++        "   let n = el;" +
++        "   while (n.parentElement && !n.parentElement.contains(pw)) n = n.parentElement;" +
++        "   if (n !== document.body && n !== document.documentElement) hide(n);" +
++        "  });" +
++        " };" +
++        " let timer = 0;" +
++        " const later = () => { if (!timer) timer = setTimeout(() => { timer = 0; run(); }, 50); };" +
++        " window.__elHideChrome = run;" +
++        " const start = () => { run(); new MutationObserver(later).observe(document.documentElement, { childList: true, subtree: true }); };" +
++        " if (document.documentElement) start(); else document.addEventListener('DOMContentLoaded', start);" +
++        "})()";
++
 +    private Dialog loginDialog;
 +    private final Handler main = new Handler(Looper.getMainLooper());
 +
@@ -551,6 +583,12 @@ index 00000000..e5c4d523
 +        Uri uri = Uri.parse(url);
 +        String path = uri.getPath() == null ? "" : uri.getPath();
 +        return isEntryHost(uri) && !path.startsWith("/signin");
++    }
++
++    /** 엔트리 로그인 화면이면 머리말·바닥글 숨김 스크립트를 실행 (네이버·웨일 로그인 화면은 건드리지 않음) */
++    private static void hideChrome(WebView view, String url) {
++        if (url == null || !isEntryHost(Uri.parse(url))) return;
++        view.evaluateJavascript(HIDE_CHROME_SCRIPT, null);
 +    }
 +
 +    /** evaluateJavascript 결과("null" 또는 JSON 객체 문자열)를 사용자 정보로 */
@@ -679,6 +717,11 @@ index 00000000..e5c4d523
 +
 +            web.setWebViewClient(new WebViewClient() {
 +                @Override
++                public void onPageCommitVisible(WebView view, String url) {
++                    hideChrome(view, url);
++                }
++
++                @Override
 +                public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
 +                    if (!finished[0] && isAfterLogin(url)) {
 +                        cover.setVisibility(View.VISIBLE);
@@ -689,6 +732,7 @@ index 00000000..e5c4d523
 +
 +                @Override
 +                public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
++                    hideChrome(view, url);
 +                    // 로그인 직후 같은 페이지 안에서 엔트리 화면으로 넘어간 경우 → 덮개를 씌우고 로그인 확인
 +                    if (finished[0] || !isAfterLogin(url)) return;
 +                    cover.setVisibility(View.VISIBLE);
@@ -719,6 +763,7 @@ index 00000000..e5c4d523
 +
 +                @Override
 +                public void onPageFinished(final WebView view, String url) {
++                    hideChrome(view, url);
 +                    if (finished[0] || !isAfterLogin(url)) return;
 +                    view.evaluateJavascript(USER_SCRIPT, (value) -> {
 +                        if (finished[0]) return;
