@@ -8680,15 +8680,29 @@ index 00000000..86986717
 +}
 diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
 new file mode 100644
-index 00000000..9986b556
+index 00000000..2930e919
 --- /dev/null
 +++ b/src/common/buildInfo.ts
-@@ -0,0 +1,5 @@
+@@ -0,0 +1,19 @@
 +/**
-+ * [entry-local] 패치 버전 — 내 작품 창 아래에 표시된다.
-+ * 태블릿·PC 에 설치된 앱이 최신 패치로 빌드된 것인지 확인하는 용도. 패치를 낼 때마다 올린다.
++ * [entry-local] 앱 정보 — 앱 정보 창(? 메뉴 → 앱 정보)과 내 작품 창 아래에 표시된다.
++ *
++ * ★ 패치를 낼 때마다 APP_VERSION 과 ENTRY_LOCAL_BUILD 를 올린다.
++ *   - APP_VERSION: 사용자에게 보이는 버전 (v1.0.0 → v1.0.1 → … 큰 변경은 v1.1.0)
++ *   - ENTRY_LOCAL_BUILD: 같은 버전 안에서 어떤 패치로 빌드됐는지 구별하는 날짜 번호
 + */
-+export const ENTRY_LOCAL_BUILD = '2026.10.22-h'; // 파일에서 연 작품 원래 파일에 덮어쓰기
++export const APP_VERSION = '1.0.0';
++export const ENTRY_LOCAL_BUILD = '2026.10.23-b'; // 개발자 표기 (개인)
++
++/** 앱 이름 (안드로이드 / Windows) */
++export const APP_NAME_ANDROID = 'Entry for Android';
++export const APP_NAME_WINDOWS = '엔트리 로컬 (Entry Local)';
++
++/** 개발자 (앱 정보 창과 저작권 줄에 쓰인다) */
++export const APP_DEVELOPER = '머류 (feat. Claude)';
++/** 저작권자 (개인) — 저작권 줄에는 사람 이름만 쓴다 */
++export const COPYRIGHT_HOLDER = '머류';
++export const COPYRIGHT_YEAR = '2026';
 diff --git a/src/common/driveClient.ts b/src/common/driveClient.ts
 new file mode 100644
 index 00000000..92f01770
@@ -11047,7 +11061,7 @@ index 00000000..5276766f
 +    </body>
 +</html>
 diff --git a/src/preload/nativeMenu.ts b/src/preload/nativeMenu.ts
-index 12e1e85b..88f553e5 100644
+index 12e1e85b..bc4f41d7 100644
 --- a/src/preload/nativeMenu.ts
 +++ b/src/preload/nativeMenu.ts
 @@ -15,8 +15,15 @@ const getTemplate = function() {
@@ -11067,7 +11081,14 @@ index 12e1e85b..88f553e5 100644
                      click() {
                          Entry && Entry.dispatchEvent('loadWorkspace');
                      },
-@@ -38,6 +45,13 @@ const getTemplate = function() {
+@@ -32,12 +39,19 @@ const getTemplate = function() {
+                     },
+                 },
+                 {
+-                    label: getLang('Workspace.file_save_as'),
++                    label: (((window as any).Lang || {}).type || 'ko') === 'ko' ? '다른 이름으로 저장' : 'Save as',
+                     accelerator: 'Shift+CmdOrCtrl+S',
+                     click() {
                          Entry && Entry.dispatchEvent('saveAsWorkspace');
                      },
                  },
@@ -11268,10 +11289,10 @@ index 0fa6192c..c4aa15ad 100644
 +    min-width: 0 !important;
 +}
 diff --git a/src/renderer/components/header.tsx b/src/renderer/components/header.tsx
-index e7ca0a84..6c46c92a 100644
+index e7ca0a84..55078440 100644
 --- a/src/renderer/components/header.tsx
 +++ b/src/renderer/components/header.tsx
-@@ -12,6 +12,24 @@ import ImportToggleHelper from '../helper/importToggleHelper';
+@@ -12,6 +12,25 @@ import ImportToggleHelper from '../helper/importToggleHelper';
  import { IStoreState } from '../store/modules';
  import { IMapDispatchToProps, IMapStateToProps } from '../store';
  import styled from 'styled-components';
@@ -11279,6 +11300,7 @@ index e7ca0a84..6c46c92a 100644
 +import { getPerformanceSettings } from '../helper/entry/performance';
 +import { openPrintView } from '../helper/printProject';
 +import { showLoginAlert } from '../helper/loginAlert';
++import { showAppInfo } from '../helper/appInfoAlert';
 +import { accountLabel, accountsAvailable, cloudAvailable, cloudReady, getCloudState, subscribeCloud } from '../helper/cloudState';
 +
 +// [entry-local] 계정 메뉴 동작
@@ -11296,7 +11318,7 @@ index e7ca0a84..6c46c92a 100644
  
  const FoundationLabel = styled.span`
      float: left;
-@@ -33,6 +51,8 @@ interface IProps extends IReduxDispatch, IReduxState {
+@@ -33,6 +52,8 @@ interface IProps extends IReduxDispatch, IReduxState {
      onProgramLanguageChanged: (key: string) => void;
      onLoadProject: () => void;
      onReloadProject: () => void;
@@ -11305,7 +11327,7 @@ index e7ca0a84..6c46c92a 100644
      programLanguageMode: string;
      executionStatus: {
          canRedo: boolean;
-@@ -44,6 +64,163 @@ type DropDownItemPair = [string | ReactElement, string];
+@@ -44,6 +65,163 @@ type DropDownItemPair = [string | ReactElement, string];
  
  class Header extends Component<IProps, IState> {
      dropdownList: any;
@@ -11469,7 +11491,7 @@ index e7ca0a84..6c46c92a 100644
  
      constructor(props: Readonly<IProps>) {
          super(props);
-@@ -63,15 +240,56 @@ class Header extends Component<IProps, IState> {
+@@ -63,15 +241,54 @@ class Header extends Component<IProps, IState> {
      get fileList(): DropDownItemPair[] {
          return [
              [RendererUtils.getLang('Workspace.file_new'), 'new'],
@@ -11482,23 +11504,21 @@ index e7ca0a84..6c46c92a 100644
      get saveList(): DropDownItemPair[] {
 -        return [
 -            [RendererUtils.getLang('Workspace.file_save'), 'save'],
-+        const list: DropDownItemPair[] = [[RendererUtils.getLang('Workspace.file_save'), 'save']];
-+        // [entry-local] 로그인되어 있으면 저장 위치를 고를 수 있다
+-            [RendererUtils.getLang('Workspace.file_save_as'), 'save_as'],
++        // [entry-local] 저장 메뉴: 이 기기에 저장 · 다른 이름으로 저장 · (구글 드라이브) · (엔트리 계정) · 파일로 내보내기
++        //   ('저장하기'는 '이 기기에 저장'과 같아서 뺐다. 단축키 Ctrl+S 는 지금 작품을 저장한 곳에 그대로 저장)
++        const list: DropDownItemPair[] = [
++            [lt('이 기기에 저장', 'Save to this device'), 'save_local'],
++            [lt('다른 이름으로 저장', 'Save as'), 'save_as'],
+         ];
 +        const entryReady = getCloudState().online && !!getCloudState().entry;
-+        if (cloudReady() || entryReady) {
-+            list.push([lt('이 기기에 저장', 'Save to this device'), 'save_local']);
-+        }
 +        if (cloudReady()) {
 +            list.push([lt('구글 드라이브에 저장', 'Save to Google Drive'), 'save_drive']);
 +        }
 +        if (entryReady) {
 +            list.push([lt('엔트리 계정에 저장', 'Save to Entry account'), 'save_entry']);
 +        }
-+        list.push(
-             [RendererUtils.getLang('Workspace.file_save_as'), 'save_as'],
--        ];
-+            [lt('파일로 내보내기 (.ent)', 'Export to file (.ent)'), 'export'] // [entry-local]
-+        );
++        list.push([lt('파일로 내보내기 (.ent)', 'Export to file (.ent)'), 'export']); // [entry-local]
 +        return list;
 +    }
 +
@@ -11530,6 +11550,14 @@ index e7ca0a84..6c46c92a 100644
      }
  
      get helpList(): DropDownItemPair[] {
+@@ -84,6 +301,7 @@ class Header extends Component<IProps, IState> {
+                 ? [RendererUtils.getLang('Workspace.hardware_guide'), 'help_hardware']
+                 : [RendererUtils.getLang('Workspace.robot_guide'), 'help_robot'],
+             [RendererUtils.getLang('Workspace.python_guide'), 'help_python'],
++            [lt('앱 정보', 'App info'), 'app_info'], // [entry-local]
+         ];
+     }
+ 
 @@ -102,6 +320,17 @@ class Header extends Component<IProps, IState> {
          ];
      }
@@ -11561,7 +11589,18 @@ index e7ca0a84..6c46c92a 100644
          }
      }
  
-@@ -277,32 +512,13 @@ class Header extends Component<IProps, IState> {
+@@ -205,6 +440,10 @@ class Header extends Component<IProps, IState> {
+ 
+     handleHelpClick(item: DropDownItemPair) {
+         const key = item[1];
++        if (key === 'app_info') {
++            showAppInfo();
++            return;
++        }
+         if (key === 'help_block') {
+             Entry.dispatchEvent('showBlockHelper');
+         } else {
+@@ -277,32 +516,13 @@ class Header extends Component<IProps, IState> {
                  </div>
                  {!isValidProduct && (
                      <div className="invalidate_check_box">
@@ -11596,7 +11635,7 @@ index e7ca0a84..6c46c92a 100644
                          {
                              // 새로만들기, 불러오기
                              <div className={'work_space'}>
-@@ -393,9 +609,33 @@ class Header extends Component<IProps, IState> {
+@@ -393,9 +613,33 @@ class Header extends Component<IProps, IState> {
                          </div>
                      </div>
  
@@ -11633,7 +11672,7 @@ index e7ca0a84..6c46c92a 100644
                              <div className={'work_space'}>
                                  <a
                                      className={`link_workspace_text text_work_space  ${
-@@ -410,28 +650,105 @@ class Header extends Component<IProps, IState> {
+@@ -410,28 +654,105 @@ class Header extends Component<IProps, IState> {
                                  </a>
                                  {this.makeDropdown('mode', this.modeList)}
                              </div>
@@ -11753,7 +11792,7 @@ index e7ca0a84..6c46c92a 100644
              </header>
          );
 diff --git a/src/renderer/components/workspace.tsx b/src/renderer/components/workspace.tsx
-index 32eb38dd..868e2769 100644
+index 32eb38dd..043e2616 100644
 --- a/src/renderer/components/workspace.tsx
 +++ b/src/renderer/components/workspace.tsx
 @@ -1,5 +1,5 @@
@@ -11763,7 +11802,7 @@ index 32eb38dd..868e2769 100644
  import './workspace.scss';
  import '../resources/styles/fonts.scss';
  import { connect } from 'react-redux';
-@@ -23,6 +23,54 @@ import { IMapDispatchToProps, IMapStateToProps } from '../store';
+@@ -23,6 +23,55 @@ import { IMapDispatchToProps, IMapStateToProps } from '../store';
  import DragAndDropContainer from './DragAndDropContainer';
  import EntryModalHelper from '../helper/entry/entryModalHelper';
  import ipcRendererHelper from '../helper/ipcRendererHelper';
@@ -11800,6 +11839,7 @@ index 32eb38dd..868e2769 100644
 +import { chooseLoginMethod } from '../helper/loginChooser';
 +import { showSaveDoneAlert } from '../helper/saveDoneAlert';
 +import { showSavingAlert } from '../helper/savingAlert';
++import { promptName } from '../helper/namePrompt';
 +import { startEditorLabels } from '../helper/editorLabels';
 +import { lt, setMainLang, currentLang } from '../../common/localLang';
 +
@@ -11818,7 +11858,7 @@ index 32eb38dd..868e2769 100644
  
  interface IProps extends IReduxDispatch, IReduxState {}
  
-@@ -34,6 +82,35 @@ class Workspace extends Component<IProps> {
+@@ -34,6 +83,35 @@ class Workspace extends Component<IProps> {
      private isFirstRender = true;
      private isSavingCanvasData = false;
      private isSaveProject = false;
@@ -11854,7 +11894,7 @@ index 32eb38dd..868e2769 100644
      private defaultInitOption = {
          type: 'workspace',
          backpackDisable: true,
-@@ -60,7 +137,15 @@ class Workspace extends Component<IProps> {
+@@ -60,7 +138,15 @@ class Workspace extends Component<IProps> {
      };
  
      get initOption() {
@@ -11871,7 +11911,7 @@ index 32eb38dd..868e2769 100644
      }
  
      constructor(props: Readonly<IProps>) {
-@@ -86,7 +171,11 @@ class Workspace extends Component<IProps> {
+@@ -86,7 +172,11 @@ class Workspace extends Component<IProps> {
      }
  
      componentDidMount() {
@@ -11884,7 +11924,7 @@ index 32eb38dd..868e2769 100644
          setTimeout(async () => {
              await this._waitFontLoad();
              try {
-@@ -108,7 +197,130 @@ class Workspace extends Component<IProps> {
+@@ -108,7 +198,130 @@ class Workspace extends Component<IProps> {
          }, 0);
      }
  
@@ -12015,7 +12055,7 @@ index 32eb38dd..868e2769 100644
          if (
              prevProps.common.projectName &&
              prevProps.common.projectName !== this.props.common.projectName
-@@ -140,7 +352,7 @@ class Workspace extends Component<IProps> {
+@@ -140,7 +353,7 @@ class Workspace extends Component<IProps> {
          const addEventListener = Entry.addEventListener.bind(Entry);
  
          addEventListener('openBackPack', () => {
@@ -12024,7 +12064,7 @@ index 32eb38dd..868e2769 100644
          });
          // 교과형에서 하드웨어가 바뀔때 마다 카테고리 변화
          addEventListener('hwChanged', this.handleHardwareChange);
-@@ -162,6 +374,14 @@ class Workspace extends Component<IProps> {
+@@ -162,6 +375,14 @@ class Workspace extends Component<IProps> {
          addEventListener('saveAsWorkspace', () => {
              this.handleSaveAction('saveAs');
          });
@@ -12039,7 +12079,7 @@ index 32eb38dd..868e2769 100644
          addEventListener('saveCanvasImage', (data: any) => {
              this.handleCanvasImageSave(data);
          });
-@@ -373,6 +593,10 @@ class Workspace extends Component<IProps> {
+@@ -373,6 +594,10 @@ class Workspace extends Component<IProps> {
          const project = Entry.exportProject();
          if (project) {
              project.name = this._getProjectName();
@@ -12050,7 +12090,7 @@ index 32eb38dd..868e2769 100644
              Object.assign(project, option);
              LocalStorageManager.saveProject(project);
          }
-@@ -438,78 +662,473 @@ class Workspace extends Component<IProps> {
+@@ -438,78 +663,486 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -12091,11 +12131,24 @@ index 32eb38dd..868e2769 100644
 +            }
 +            return;
 +        }
-+        // 다른 이름으로 저장: 지금 저장하는 곳에 복사본
++        // 다른 이름으로 저장: 이름을 물어보고, 지금 저장하는 곳(이 기기 / 구글 드라이브)에 새 작품으로 저장
++        const current = this._getProjectName();
++        const name = await promptName({
++            title: lt('다른 이름으로 저장', 'Save as'),
++            label: lt('새 작품 이름', 'New project name'),
++            value: lt(`${current} 복사본`, `${current} copy`),
++        });
++        if (!name) {
++            return;
++        }
++        // 새 작품이 되므로 원래 파일·엔트리 계정 작품과의 연결은 끊는다 (원본에 덮어쓰지 않게)
++        delete this.projectSavedPath;
++        delete this.entryProjectId;
++        this.props.CommonActions.changeProjectName(name);
 +        if (driveTarget) {
-+            await this.saveToDrive({ asNew: true });
++            await this.saveToDrive({ asNew: true, name });
 +        } else {
-+            await this.saveToLocalStore({ asNew: true, silent: false });
++            await this.saveToLocalStore({ asNew: true, silent: false, name });
 +        }
 +    };
  
@@ -12184,7 +12237,7 @@ index 32eb38dd..868e2769 100644
 -                { width: 220 }
 -            );
 +    /** [entry-local] 구글 드라이브에 저장 */
-+    saveToDrive = async ({ asNew }: { asNew: boolean }) => {
++    saveToDrive = async ({ asNew, name: askedName }: { asNew: boolean; name?: string }) => {
 +        if (this.isSaveProject) {
 +            return;
 +        }
@@ -12202,7 +12255,7 @@ index 32eb38dd..868e2769 100644
 +            }
 +        }
 +        const projectName = this._getProjectName();
-+        const name = asNew && this.cloudFileId ? lt(`${projectName} 복사본`, `${projectName} copy`) : projectName;
++        const name = askedName || (asNew && this.cloudFileId ? lt(`${projectName} 복사본`, `${projectName} copy`) : projectName);
 +        this.showModalProgress('progress', lt('구글 드라이브에 저장하는 중…', 'Saving to Google Drive…'), '', { width: 260 });
 +        try {
 +            window.addEventListener('beforeunload', this.handleBeforeSaveProject);
@@ -12334,14 +12387,15 @@ index 32eb38dd..868e2769 100644
 +                }
 +        }
 +    };
-+
-+    _exportCurrentProject() {
-+        const { persist } = this.props;
-+        const { mode } = persist;
  
 -                await IpcRendererHelper.saveProject(project, filePath);
 -                await RendererUtils.clearTempProject({ saveTemp: true });
 -                this.projectSavedPath = filePath;
++    _exportCurrentProject() {
++        const { persist } = this.props;
++        const { mode } = persist;
+ 
+-                // 모달 해제 후 엔트리 토스트로 저장처리
 +        Entry.stage.handle.setVisible(false);
 +        Entry.stage.update();
 +        const project = Entry.exportProject();
@@ -12356,7 +12410,7 @@ index 32eb38dd..868e2769 100644
 +        return project;
 +    }
 +
-+    saveToLocalStore = async ({ asNew, silent }: { asNew: boolean; silent: boolean }) => {
++    saveToLocalStore = async ({ asNew, silent, name: askedName }: { asNew: boolean; silent: boolean; name?: string }) => {
 +        if (this.isSaveProject) {
 +            return;
 +        }
@@ -12372,10 +12426,10 @@ index 32eb38dd..868e2769 100644
 +            this.isSaveProject = true;
 +
 +            const project = this._exportCurrentProject();
-+            const isCopy = asNew && !!this.localProjectId;
++            const isCopy = asNew && (!!this.localProjectId || !!askedName);
 +            const meta = await IpcRendererHelper.localStoreSave(project, {
 +                id: asNew ? undefined : this.localProjectId,
-+                name: isCopy ? lt(`${projectName} 복사본`, `${projectName} copy`) : projectName,
++                name: askedName || (isCopy ? lt(`${projectName} 복사본`, `${projectName} copy`) : projectName),
 +                thumbnail: makeStageThumbnail(),
 +            });
 +            this.localProjectId = meta.id;
@@ -12401,8 +12455,7 @@ index 32eb38dd..868e2769 100644
 +            // 정식 저장이 끝났으므로 비정상 종료 복구용 임시본은 비운다 (원본 동작과 동일)
 +            this.handleStorageProjectSave.cancel();
 +            LocalStorageManager.clearSavedProject();
- 
--                // 모달 해제 후 엔트리 토스트로 저장처리
++
 +            if (!silent) {
                  this.hideModalProgress();
 -                Entry.stateManager.addStamp();
@@ -12575,7 +12628,7 @@ index 32eb38dd..868e2769 100644
      };
  
      handleFileAction = async (type: string) => {
-@@ -518,6 +1137,10 @@ class Workspace extends Component<IProps> {
+@@ -518,6 +1151,10 @@ class Workspace extends Component<IProps> {
                  await RendererUtils.clearTempProject();
                  await this.loadProject();
              }
@@ -12586,7 +12639,7 @@ index 32eb38dd..868e2769 100644
          } else if (type === 'open_offline') {
              this._loadProjectFromFile(
                  () =>
-@@ -576,11 +1199,33 @@ class Workspace extends Component<IProps> {
+@@ -576,11 +1213,33 @@ class Workspace extends Component<IProps> {
          let projectWorkspaceMode = currentWorkspaceMode;
  
          if (project) {
@@ -12620,7 +12673,7 @@ index 32eb38dd..868e2769 100644
              delete this.projectSavedPath;
              delete this.projectParent;
              CommonActions.changeProjectName(RendererUtils.getDefaultProjectName());
-@@ -602,8 +1247,14 @@ class Workspace extends Component<IProps> {
+@@ -602,8 +1261,14 @@ class Workspace extends Component<IProps> {
          }
          Entry.reloadBlock();
          this.isFirstRender = false;
@@ -12635,7 +12688,7 @@ index 32eb38dd..868e2769 100644
          try {
              if (project) {
                  await Entry.loadExternalModules(project);
-@@ -633,9 +1284,40 @@ class Workspace extends Component<IProps> {
+@@ -633,9 +1298,40 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -12676,7 +12729,7 @@ index 32eb38dd..868e2769 100644
          await this.loadProject(project);
      };
  
-@@ -717,6 +1399,8 @@ class Workspace extends Component<IProps> {
+@@ -717,6 +1413,8 @@ class Workspace extends Component<IProps> {
                          onFileAction={this.handleFileAction}
                          onReloadProject={this.reloadProject}
                          onLoadProject={this.loadProject}
@@ -12685,6 +12738,154 @@ index 32eb38dd..868e2769 100644
                          onProgramLanguageChanged={this.handleProgramLanguageModeChanged}
                          programLanguageMode={programLanguageMode}
                          executionStatus={executionStatus}
+diff --git a/src/renderer/helper/appInfoAlert.ts b/src/renderer/helper/appInfoAlert.ts
+new file mode 100644
+index 00000000..5cb9eca5
+--- /dev/null
++++ b/src/renderer/helper/appInfoAlert.ts
+@@ -0,0 +1,142 @@
++/**
++ * [entry-local] 앱 정보 창 (? 메뉴 → 앱 정보)
++ * 엔트리 알림창과 같은 모양: 파란 머리띠(앱 정보 · 닫기) + 본문 + [확인]
++ */
++import { lt } from '../../common/localLang';
++import {
++    APP_DEVELOPER,
++    APP_NAME_ANDROID,
++    APP_NAME_WINDOWS,
++    APP_VERSION,
++    COPYRIGHT_HOLDER,
++    COPYRIGHT_YEAR,
++    ENTRY_LOCAL_BUILD,
++} from '../../common/buildInfo';
++
++const OVERLAY_ID = 'entry-local-app-info';
++const STYLE_ID = 'entry-local-app-info-style';
++
++const CSS = `
++#${OVERLAY_ID}{position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);font-family:inherit}
++#${OVERLAY_ID} .eai-box{width:520px;max-width:calc(100vw - 32px);max-height:calc(100vh - 40px);display:flex;flex-direction:column;background:#fff;border-radius:6px;overflow:hidden;box-shadow:0 6px 24px rgba(0,0,0,.25)}
++#${OVERLAY_ID} .eai-head{position:relative;flex:none;display:flex;align-items:center;height:54px;padding:0 26px;background:#4f80ff;color:#fff;font-size:20px;font-weight:bold}
++#${OVERLAY_ID} .eai-close{position:absolute;top:50%;right:26px;width:26px;height:26px;margin-top:-13px;padding:0;border:0;background:none;cursor:pointer}
++#${OVERLAY_ID} .eai-close:before,#${OVERLAY_ID} .eai-close:after{content:"";position:absolute;top:50%;left:50%;width:24px;height:3px;margin:-1.5px 0 0 -12px;background:#fff;border-radius:2px}
++#${OVERLAY_ID} .eai-close:before{transform:rotate(45deg)}
++#${OVERLAY_ID} .eai-close:after{transform:rotate(-45deg)}
++#${OVERLAY_ID} .eai-body{flex:1;overflow-y:auto;padding:26px 28px 8px;color:#333;font-size:14px;line-height:1.6}
++#${OVERLAY_ID} .eai-app{display:flex;align-items:center;gap:14px;margin-bottom:18px}
++#${OVERLAY_ID} .eai-logo{flex:none;width:52px;height:52px;border-radius:12px;background:#4f80ff;color:#fff;font-size:30px;font-weight:bold;display:flex;align-items:center;justify-content:center}
++#${OVERLAY_ID} .eai-name{font-size:19px;font-weight:bold;color:#222}
++#${OVERLAY_ID} .eai-ver{color:#888;font-size:13px}
++#${OVERLAY_ID} table{width:100%;border-collapse:collapse;margin-bottom:20px}
++#${OVERLAY_ID} th,#${OVERLAY_ID} td{padding:8px 10px;border-top:1px solid #e9edf5;text-align:left;vertical-align:top}
++#${OVERLAY_ID} tr:last-child th,#${OVERLAY_ID} tr:last-child td{border-bottom:1px solid #e9edf5}
++#${OVERLAY_ID} th{width:96px;color:#4f80ff;font-weight:bold;background:#f6f8fd}
++#${OVERLAY_ID} h3{margin:0 0 8px;font-size:15px;color:#222}
++#${OVERLAY_ID} p{margin:0 0 10px}
++#${OVERLAY_ID} ul{margin:0 0 12px;padding:0;list-style:none}
++#${OVERLAY_ID} li{margin:0 0 8px;padding:10px 12px;border-radius:6px;background:#f6f8fd}
++#${OVERLAY_ID} li b{display:block;color:#222}
++#${OVERLAY_ID} li span{display:block;color:#666;font-size:13px;word-break:break-all}
++#${OVERLAY_ID} .eai-note{color:#666;font-size:13px}
++#${OVERLAY_ID} .eai-copy{margin:14px 0 18px;text-align:center;color:#888;font-size:12px}
++#${OVERLAY_ID} .eai-buttons{flex:none;display:flex;justify-content:center;padding:14px 24px 24px}
++#${OVERLAY_ID} .eai-ok{width:146px;height:48px;border:1px solid #4f80ff;border-radius:4px;background:#4f80ff;color:#fff;font:inherit;font-size:15px;font-weight:bold;cursor:pointer}
++`;
++
++function ensureStyle() {
++    if (!document.getElementById(STYLE_ID)) {
++        const style = document.createElement('style');
++        style.id = STYLE_ID;
++        style.textContent = CSS;
++        document.head.appendChild(style);
++    }
++}
++
++function esc(text: string) {
++    return text.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
++}
++
++function isAndroid() {
++    const cap = (window as any).Capacitor;
++    return !!(cap && cap.isNativePlatform && cap.isNativePlatform() && cap.getPlatform && cap.getPlatform() === 'android');
++}
++
++export function showAppInfo() {
++    ensureStyle();
++    document.getElementById(OVERLAY_ID)?.remove();
++    const android = isAndroid();
++    const appName = android ? APP_NAME_ANDROID : APP_NAME_WINDOWS;
++    const runtime = android
++        ? lt('안드로이드 시스템 웹뷰', 'Android System WebView')
++        : lt('Electron(Chromium)', 'Electron (Chromium)');
++
++    const item = (title: string, lines: string[]) =>
++        `<li><b>${esc(title)}</b>${lines.map((l) => `<span>${esc(l)}</span>`).join('')}</li>`;
++
++    const overlay = document.createElement('div');
++    overlay.id = OVERLAY_ID;
++    overlay.innerHTML =
++        `<div class="eai-box" role="dialog" aria-modal="true" aria-label="${esc(lt('앱 정보', 'App info'))}">` +
++        `<div class="eai-head">${esc(lt('앱 정보', 'App info'))}<button class="eai-close" type="button" aria-label="${esc(lt('닫기', 'Close'))}"></button></div>` +
++        '<div class="eai-body">' +
++        `<div class="eai-app"><div class="eai-logo">e</div><div><div class="eai-name">${esc(appName)}</div><div class="eai-ver">v${esc(APP_VERSION)} · ${esc(lt('패치', 'Patch'))} ${esc(ENTRY_LOCAL_BUILD)}</div></div></div>` +
++        '<table>' +
++        `<tr><th>${esc(lt('앱 이름', 'App name'))}</th><td>${esc(appName)}</td></tr>` +
++        `<tr><th>${esc(lt('버전', 'Version'))}</th><td>v${esc(APP_VERSION)} <span class="eai-note">(${esc(lt('패치', 'patch'))} ${esc(ENTRY_LOCAL_BUILD)})</span></td></tr>` +
++        `<tr><th>${esc(lt('개발자', 'Developer'))}</th><td>${esc(APP_DEVELOPER)}</td></tr>` +
++        '</table>' +
++        `<h3>[ ${esc(lt('오픈소스 및 저작권 안내', 'Open source & copyright notice'))} ]</h3>` +
++        `<p>${esc(
++            lt(
++                "본 애플리케이션은 네이버 커넥트재단의 'entry-offline' 및 '엔티피(Entify)' 오픈소스 프로젝트를 활용하여 제작되었습니다.",
++                "This application was built using NAVER Connect Foundation's 'entry-offline' and the 'Entify' open source projects."
++            )
++        )}</p>` +
++        '<ul>' +
++        item('Entry Platform', ['Copyright ⓒ NAVER Connect Foundation.', 'https://playentry.org']) +
++        item('entry-offline', ['Copyright ⓒ NAVER Connect Foundation (entrylabs) · MIT License', 'https://github.com/entrylabs/entry-offline']) +
++        item(lt('엔티피 (Entify) — 엔트리 비공식 로그인 방식 참고', 'Entify — reference for the unofficial Entry login'), [
++            'Copyright ⓒ axolotl-rosi · Entify Source-Available License v1.0',
++            'https://github.com/axolotl-rosi/Entify',
++        ]) +
++        '</ul>' +
++        `<p class="eai-note">${esc(
++            lt(
++                `본 앱은 ${runtime} 및 오픈소스 기술을 활용하고 있습니다.`,
++                `This app uses ${runtime} and open source technologies.`
++            )
++        )}</p>` +
++        `<p class="eai-note">${esc(
++            lt(
++                '본 앱은 네이버 커넥트재단의 공식 앱이 아니며, 엔트리 계정 기능은 엔트리 공식 로그인 화면을 그대로 사용합니다. 비밀번호는 앱에 저장되지 않습니다.',
++                'This is not an official app of NAVER Connect Foundation. Entry account features use the official Entry login page, and your password is not stored in this app.'
++            )
++        )}</p>` +
++        `<div class="eai-copy">Copyright ${esc(COPYRIGHT_YEAR)}. ${esc(COPYRIGHT_HOLDER)}. All rights reserved.</div>` +
++        '</div>' +
++        `<div class="eai-buttons"><button class="eai-ok" type="button">${esc(lt('확인', 'OK'))}</button></div>` +
++        '</div>';
++
++    const close = () => {
++        document.removeEventListener('keydown', onKey, true);
++        overlay.remove();
++    };
++    const onKey = (e: KeyboardEvent) => {
++        if (e.key === 'Escape' || e.key === 'Enter') {
++            e.stopPropagation();
++            close();
++        }
++    };
++    (overlay.querySelector('.eai-close') as HTMLElement).onclick = close;
++    (overlay.querySelector('.eai-ok') as HTMLElement).onclick = close;
++    overlay.addEventListener('mousedown', (e) => {
++        if (e.target === overlay) {
++            close();
++        }
++    });
++    document.addEventListener('keydown', onKey, true);
++    document.body.appendChild(overlay);
++    (overlay.querySelector('.eai-ok') as HTMLElement).focus();
++}
 diff --git a/src/renderer/helper/cloudState.ts b/src/renderer/helper/cloudState.ts
 new file mode 100644
 index 00000000..5084efa3
@@ -14731,6 +14932,100 @@ index 00000000..0a07529d
 +        backdrop.appendChild(box);
 +        document.body.appendChild(backdrop);
 +        ok.focus();
++    });
++}
+diff --git a/src/renderer/helper/namePrompt.ts b/src/renderer/helper/namePrompt.ts
+new file mode 100644
+index 00000000..6efdee16
+--- /dev/null
++++ b/src/renderer/helper/namePrompt.ts
+@@ -0,0 +1,88 @@
++/**
++ * [entry-local] 이름 입력 창 (다른 이름으로 저장)
++ * 엔트리 알림창과 같은 모양: 파란 머리띠(제목 · 닫기) + 입력칸 + [취소] [저장]
++ * 결과: 입력한 이름, 취소하면 null
++ */
++import { lt } from '../../common/localLang';
++
++const OVERLAY_ID = 'entry-local-name-prompt';
++const STYLE_ID = 'entry-local-name-prompt-style';
++
++const CSS = `
++#${OVERLAY_ID}{position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);font-family:inherit}
++#${OVERLAY_ID} .enp-box{width:388px;max-width:calc(100vw - 32px);background:#fff;border-radius:6px;overflow:hidden;box-shadow:0 6px 24px rgba(0,0,0,.25)}
++#${OVERLAY_ID} .enp-head{position:relative;display:flex;align-items:center;height:54px;padding:0 26px;background:#4f80ff;color:#fff;font-size:20px;font-weight:bold}
++#${OVERLAY_ID} .enp-close{position:absolute;top:50%;right:26px;width:26px;height:26px;margin-top:-13px;padding:0;border:0;background:none;cursor:pointer}
++#${OVERLAY_ID} .enp-close:before,#${OVERLAY_ID} .enp-close:after{content:"";position:absolute;top:50%;left:50%;width:24px;height:3px;margin:-1.5px 0 0 -12px;background:#fff;border-radius:2px}
++#${OVERLAY_ID} .enp-close:before{transform:rotate(45deg)}
++#${OVERLAY_ID} .enp-close:after{transform:rotate(-45deg)}
++#${OVERLAY_ID} .enp-body{padding:30px 24px 32px}
++#${OVERLAY_ID} .enp-label{display:block;margin:0 0 10px;color:#333;font-size:15px;font-weight:bold}
++#${OVERLAY_ID} .enp-input{width:100%;height:44px;box-sizing:border-box;padding:0 12px;border:1px solid #c9d3e6;border-radius:4px;font:inherit;font-size:15px;color:#222}
++#${OVERLAY_ID} .enp-input:focus{outline:none;border-color:#4f80ff;box-shadow:0 0 0 2px rgba(79,128,255,.2)}
++#${OVERLAY_ID} .enp-hint{min-height:18px;margin:6px 0 22px;color:#e0473e;font-size:12px}
++#${OVERLAY_ID} .enp-buttons{display:flex;justify-content:center;gap:10px}
++#${OVERLAY_ID} .enp-buttons button{width:146px;height:48px;border-radius:4px;font:inherit;font-size:15px;font-weight:bold;cursor:pointer}
++#${OVERLAY_ID} .enp-cancel{border:1px solid #4f80ff;background:#fff;color:#4f80ff}
++#${OVERLAY_ID} .enp-ok{border:1px solid #4f80ff;background:#4f80ff;color:#fff}
++`;
++
++function ensureStyle() {
++    if (!document.getElementById(STYLE_ID)) {
++        const style = document.createElement('style');
++        style.id = STYLE_ID;
++        style.textContent = CSS;
++        document.head.appendChild(style);
++    }
++}
++
++export function promptName(options: { title: string; label: string; value: string; okLabel?: string }): Promise<string | null> {
++    ensureStyle();
++    document.getElementById(OVERLAY_ID)?.remove();
++    return new Promise((resolve) => {
++        const overlay = document.createElement('div');
++        overlay.id = OVERLAY_ID;
++        overlay.innerHTML =
++            '<div class="enp-box" role="dialog" aria-modal="true">' +
++            `<div class="enp-head"><span class="enp-title"></span><button class="enp-close" type="button" aria-label="${lt('닫기', 'Close')}"></button></div>` +
++            '<div class="enp-body"><label class="enp-label"></label><input class="enp-input" type="text" maxlength="45"><div class="enp-hint"></div>' +
++            `<div class="enp-buttons"><button class="enp-cancel" type="button">${lt('취소', 'Cancel')}</button><button class="enp-ok" type="button"></button></div></div></div>`;
++        (overlay.querySelector('.enp-title') as HTMLElement).textContent = options.title;
++        (overlay.querySelector('.enp-label') as HTMLElement).textContent = options.label;
++        (overlay.querySelector('.enp-ok') as HTMLElement).textContent = options.okLabel || lt('저장', 'Save');
++        const input = overlay.querySelector('.enp-input') as HTMLInputElement;
++        const hint = overlay.querySelector('.enp-hint') as HTMLElement;
++        input.value = options.value;
++        const close = (result: string | null) => {
++            document.removeEventListener('keydown', onKey, true);
++            overlay.remove();
++            resolve(result);
++        };
++        const submit = () => {
++            const name = input.value.trim();
++            if (!name) {
++                hint.textContent = lt('이름을 입력해 주세요.', 'Please enter a name.');
++                input.focus();
++                return;
++            }
++            close(name);
++        };
++        const onKey = (e: KeyboardEvent) => {
++            if (e.key === 'Escape') {
++                e.stopPropagation();
++                close(null);
++            } else if (e.key === 'Enter') {
++                e.stopPropagation();
++                e.preventDefault();
++                submit();
++            }
++        };
++        (overlay.querySelector('.enp-close') as HTMLElement).onclick = () => close(null);
++        (overlay.querySelector('.enp-cancel') as HTMLElement).onclick = () => close(null);
++        (overlay.querySelector('.enp-ok') as HTMLElement).onclick = submit;
++        document.addEventListener('keydown', onKey, true);
++        document.body.appendChild(overlay);
++        input.focus();
++        input.select();
 +    });
 +}
 diff --git a/src/renderer/helper/printProject.ts b/src/renderer/helper/printProject.ts
