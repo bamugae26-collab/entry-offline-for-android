@@ -465,10 +465,10 @@ index 00000000..28d6785c
 +</manifest>
 diff --git a/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
 new file mode 100644
-index 00000000..374dde71
+index 00000000..e3ac547d
 --- /dev/null
 +++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
-@@ -0,0 +1,967 @@
+@@ -0,0 +1,959 @@
 +package biz.softline.entrylocal;
 +
 +import android.app.Dialog;
@@ -1091,6 +1091,7 @@ index 00000000..374dde71
 +            call.reject(tr("엔트리 주소가 아닙니다.", "This is not an Entry address."));
 +            return;
 +        }
++        cancelPending = false;
 +        final File dir = new File(getContext().getCacheDir(), "entry-save");
 +        final File file = new File(dir, fileName);
 +        try {
@@ -1104,41 +1105,13 @@ index 00000000..374dde71
 +        }
 +        main.post(() -> {
 +            final String[] projectId = { call.getString("projectId", "") };
-+            Dialog dialog = new Dialog(getActivity(), android.R.style.Theme_Material_Light_NoActionBar);
-+            dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-+
-+            FrameLayout root = new FrameLayout(getContext());
-+            root.setBackgroundColor(Color.WHITE);
-+
++            // 엔트리 작업 화면은 앱 화면(웹뷰) '뒤'에 깔아 보이지 않게 돌린다.
++            // 대기 창은 앱 화면이 직접 그린다 (저장 완료 창과 같은 모양 · [취소] → cancelSave)
++            final WebView appWeb = getBridge().getWebView();
++            final ViewGroup host = (ViewGroup) appWeb.getParent();
 +            final WebView web = new WebView(getContext());
 +            configure(web);
 +            web.getSettings().setUserAgentString(web.getSettings().getUserAgentString().replace("; wv", ""));
-+            root.addView(web, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-+
-+            // 엔트리 화면은 가려 두고, 진행 상태와 [취소]만 보여 준다 (자동으로 저장되면 창이 닫힌다)
-+            LinearLayout overlay = new LinearLayout(getContext());
-+            overlay.setOrientation(LinearLayout.VERTICAL);
-+            overlay.setGravity(Gravity.CENTER);
-+            overlay.setBackgroundColor(Color.WHITE);
-+            overlay.setPadding(dp(32), dp(32), dp(32), dp(32));
-+            overlay.setClickable(true);
-+            ProgressBar spinner = new ProgressBar(getContext());
-+            overlay.addView(spinner, new LinearLayout.LayoutParams(dp(48), dp(48)));
-+            TextView text = new TextView(getContext());
-+            text.setText(help);
-+            text.setTextColor(Color.parseColor("#2C3550"));
-+            text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
-+            text.setGravity(Gravity.CENTER);
-+            LinearLayout.LayoutParams textLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-+            textLp.topMargin = dp(20);
-+            overlay.addView(text, textLp);
-+            Button close = new Button(getContext(), null, android.R.attr.borderlessButtonStyle);
-+            close.setText(tr("취소", "Cancel"));
-+            close.setTextColor(Color.parseColor("#4F80FF"));
-+            LinearLayout.LayoutParams closeLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-+            closeLp.topMargin = dp(24);
-+            overlay.addView(close, closeLp);
-+            root.addView(overlay, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 +            web.setWebChromeClient(new WebChromeClient() {
 +                @Override
 +                public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
@@ -1147,35 +1120,59 @@ index 00000000..374dde71
 +                    return true;
 +                }
 +            });
-+            close.setOnClickListener((v) -> dialog.dismiss());
-+            dialog.setOnKeyListener((d, keyCode, event) -> {
-+                if (keyCode == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_UP) {
-+                    dialog.dismiss();
-+                    return true;
-+                }
-+                return keyCode == KeyEvent.KEYCODE_BACK;
-+            });
 +            // ---- 자동 진행 (실제 엔트리 구조 기준) ----
 +            // 작업 화면이 열리면 importScript 가 [file] → [오프라인 작품 불러오기]에 작품 파일을 직접 넣는다.
-+            // 엔트리는 그 파일로 계정에 새 작품을 만들고 /ws/<새 id> 로 이동한다 → 저장 완료로 보고 창을 닫는다.
++            // 엔트리는 그 파일로 계정에 새 작품을 만들고 /ws/<새 id> 로 이동한다 → 저장 완료.
 +            final boolean[] closed = { false };
 +            final boolean[] saved = { false };
 +            final boolean[] autoStarted = { false };
 +            final boolean[] failed = { false };
 +            final java.util.regex.Pattern WS_ID = java.util.regex.Pattern.compile("/ws/([0-9a-fA-F]{24})");
 +            final String[] startId = { null };
-+            final Runnable fail = () -> {
++            final Runnable[] fail = { null };
++            final Runnable finish = () -> {
++                if (closed[0]) return;
++                closed[0] = true;
++                if (fail[0] != null) main.removeCallbacks(fail[0]);
++                if (currentSaveCancel != null) currentSaveCancel = null;
++                try {
++                    web.stopLoading();
++                    host.removeView(web);
++                    web.destroy();
++                } catch (Exception ignored) {
++                    // 이미 정리됨
++                }
++                file.delete();
++                CookieManager.getInstance().flush();
++                JSObject r = new JSObject();
++                r.put("projectId", projectId[0]);
++                r.put("saved", saved[0]);
++                r.put("failed", failed[0] && !saved[0]);
++                call.resolve(r);
++            };
++            fail[0] = () -> {
 +                if (closed[0] || saved[0]) return;
 +                failed[0] = true;
-+                dialog.dismiss();
++                finish.run();
 +            };
-+            main.postDelayed(fail, 90000);
++            main.postDelayed(fail[0], 90000);
++            currentSaveCancel = finish; // [취소]: 저장도 실패도 아님
++            if (cancelPending) {
++                // 준비가 끝나기 전에 [취소]를 누름
++                cancelPending = false;
++                closed[0] = true;
++                file.delete();
++                currentSaveCancel = null;
++                main.removeCallbacks(fail[0]);
++                call.resolve(new JSObject());
++                return;
++            }
 +            final java.util.function.Consumer<String> onUrl = (visited) -> {
 +                if (closed[0] || saved[0] || visited == null) return;
 +                Uri u = Uri.parse(visited);
 +                String path = u.getPath() == null ? "" : u.getPath();
 +                if (isEntryHost(u) && path.startsWith("/signin")) {
-+                    fail.run(); // 엔트리 세션 만료
++                    fail[0].run(); // 엔트리 세션 만료
 +                    return;
 +                }
 +                java.util.regex.Matcher m = WS_ID.matcher(visited);
@@ -1184,24 +1181,22 @@ index 00000000..374dde71
 +                if (id.equals(startId[0])) return;
 +                projectId[0] = id;
 +                saved[0] = true;
-+                String t = texts.getString("done");
-+                if (t != null && !t.isEmpty()) text.setText(t);
-+                main.removeCallbacks(fail);
-+                main.postDelayed(dialog::dismiss, 500);
++                main.removeCallbacks(fail[0]);
++                main.postDelayed(finish, 300);
 +            };
 +            web.addJavascriptInterface(new Object() {
 +                @JavascriptInterface
 +                public void done(String json) {
 +                    main.post(() -> {
 +                        try {
-+                            if (!new JSONObject(json).optBoolean("fed")) fail.run(); // 불러오기 메뉴를 못 찾음
++                            if (!new JSONObject(json).optBoolean("fed")) fail[0].run(); // 불러오기 메뉴를 못 찾음
 +                        } catch (Exception ignored) {
 +                            // 페이지가 이동하며 끊긴 경우 등: 이동 감지로 판단
 +                        }
 +                    });
 +                }
 +            }, "EntryLocalSave");
-+            final WebViewClient base = new WebViewClient() {
++            web.setWebViewClient(new WebViewClient() {
 +                @Override
 +                public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
 +                    String scheme = request.getUrl().getScheme();
@@ -1224,8 +1219,6 @@ index 00000000..374dde71
 +                    autoStarted[0] = true;
 +                    java.util.regex.Matcher m = WS_ID.matcher(loaded == null ? "" : loaded);
 +                    startId[0] = m.find() ? m.group(1) : null;
-+                    String t = texts.getString("start");
-+                    if (t != null && !t.isEmpty()) text.setText(t);
 +                    view.evaluateJavascript(
 +                        "Promise.resolve().then(() => " + importScript + ")" +
 +                        ".then((r) => EntryLocalSave.done(JSON.stringify(r || {})))" +
@@ -1233,30 +1226,29 @@ index 00000000..374dde71
 +                        null
 +                    );
 +                }
-+            };
-+            web.setWebViewClient(base);
-+
-+            dialog.setOnDismissListener((d) -> {
-+                closed[0] = true;
-+                main.removeCallbacks(fail);
-+                web.stopLoading();
-+                web.destroy();
-+                file.delete();
-+                CookieManager.getInstance().flush();
-+                JSObject r = new JSObject();
-+                r.put("projectId", projectId[0]);
-+                r.put("saved", saved[0]);
-+                r.put("failed", failed[0] && !saved[0]);
-+                call.resolve(r);
 +            });
-+            dialog.setContentView(root);
-+            Window w = dialog.getWindow();
-+            if (w != null) {
-+                w.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
-+                w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
-+            }
-+            dialog.show();
++            // 앱 화면 아래(맨 뒤)에 같은 크기로 붙인다 → 사용자에게는 앱의 대기 창만 보인다
++            if (appWeb.getBackground() == null) appWeb.setBackgroundColor(Color.WHITE);
++            host.addView(web, 0, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 +            web.loadUrl(url);
++        });
++    }
++
++    /** 진행 중인 엔트리 계정 저장 (대기 창의 [취소]) */
++    private static Runnable currentSaveCancel;
++    private static volatile boolean cancelPending = false;
++
++    @PluginMethod
++    public void cancelSave(PluginCall call) {
++        cancelPending = true;
++        main.post(() -> {
++            Runnable cancel = currentSaveCancel;
++            currentSaveCancel = null;
++            if (cancel != null) {
++                cancelPending = false;
++                cancel.run();
++            }
++            call.resolve();
 +        });
 +    }
 +
@@ -7584,7 +7576,7 @@ index 00000000..bbadfd79
 +});
 diff --git a/mobile/scripts/assemble-www.js b/mobile/scripts/assemble-www.js
 new file mode 100644
-index 00000000..5633ebdb
+index 00000000..e1ed5da6
 --- /dev/null
 +++ b/mobile/scripts/assemble-www.js
 @@ -0,0 +1,140 @@
@@ -8575,7 +8567,7 @@ index 00000000..86986717
 +}
 diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
 new file mode 100644
-index 00000000..b517dfd9
+index 00000000..01bd0689
 --- /dev/null
 +++ b/src/common/buildInfo.ts
 @@ -0,0 +1,5 @@
@@ -8583,10 +8575,10 @@ index 00000000..b517dfd9
 + * [entry-local] 패치 버전 — 내 작품 창 아래에 표시된다.
 + * 태블릿·PC 에 설치된 앱이 최신 패치로 빌드된 것인지 확인하는 용도. 패치를 낼 때마다 올린다.
 + */
-+export const ENTRY_LOCAL_BUILD = '2026.10.22-e'; // 계정 이름 간격
++export const ENTRY_LOCAL_BUILD = '2026.10.22-f'; // 영어 마무리 · 내 작품 카드 · 계정 저장 대기 창
 diff --git a/src/common/driveClient.ts b/src/common/driveClient.ts
 new file mode 100644
-index 00000000..2e0a75fe
+index 00000000..92f01770
 --- /dev/null
 +++ b/src/common/driveClient.ts
 @@ -0,0 +1,334 @@
@@ -8924,55 +8916,9 @@ index 00000000..2e0a75fe
 +export function encodeText(text: string) {
 +    return enc.encode(text);
 +}
-diff --git a/src/common/localLang.ts b/src/common/localLang.ts
-new file mode 100644
-index 000000000..f5f569bba
---- /dev/null
-+++ b/src/common/localLang.ts
-@@ -0,0 +1,40 @@
-+/**
-+ * [entry-local] 화면 언어(한국어 / English) 선택 도우미
-+ *
-+ * 엔트리 코어가 가진 문구(Lang)는 그대로 쓰고, 엔트리 로컬이 새로 넣은 문구만
-+ * lt('한국어', 'English') 로 한 번에 두 언어를 적어 둔다.
-+ *  - 화면(렌더러·웹·안드로이드): window.Lang.type 을 따라간다 (언어를 바꾸면 Lang 이 바뀐다)
-+ *  - 메인 프로세스(Windows): window 가 없으므로 렌더러가 알려 준 값(setMainLang)을 쓴다
-+ * 한국어가 아닌 언어(en, jp, vn …)는 모두 English 문구를 쓴다.
-+ */
-+export type LocalLang = 'ko' | 'en';
-+
-+let mainLang: LocalLang = 'ko';
-+// 앱 설정(언어 선택)이 알려진 뒤에는 그 값을 최우선으로 쓴다 (window.Lang 은 다시 불러오기 전까지 이전 언어일 수 있다)
-+let explicit = false;
-+
-+export function setMainLang(lang?: string) {
-+    mainLang = lang === 'ko' || !lang ? 'ko' : 'en';
-+    explicit = true;
-+}
-+
-+export function currentLang(): LocalLang {
-+    if (explicit) {
-+        return mainLang;
-+    }
-+    const w: any = typeof window !== 'undefined' ? window : undefined;
-+    const type = w && w.Lang && (w.Lang.type || w.Lang.fallbackType);
-+    if (type) {
-+        return type === 'ko' ? 'ko' : 'en';
-+    }
-+    return mainLang;
-+}
-+
-+export function isEnglish() {
-+    return currentLang() === 'en';
-+}
-+
-+/** 현재 언어에 맞는 문구를 고른다 */
-+export function lt(ko: string, en: string): string {
-+    return currentLang() === 'en' ? en : ko;
-+}
 diff --git a/src/common/entryAccount.ts b/src/common/entryAccount.ts
 new file mode 100644
-index 00000000..8d68d317
+index 00000000..40990e28
 --- /dev/null
 +++ b/src/common/entryAccount.ts
 @@ -0,0 +1,298 @@
@@ -9274,9 +9220,55 @@ index 00000000..8d68d317
 +  ctrl.openShareProject(id);
 +  return { opened: true };
 +})()`;
+diff --git a/src/common/localLang.ts b/src/common/localLang.ts
+new file mode 100644
+index 00000000..ab770d07
+--- /dev/null
++++ b/src/common/localLang.ts
+@@ -0,0 +1,40 @@
++/**
++ * [entry-local] 화면 언어(한국어 / English) 선택 도우미
++ *
++ * 엔트리 코어가 가진 문구(Lang)는 그대로 쓰고, 엔트리 로컬이 새로 넣은 문구만
++ * lt('한국어', 'English') 로 한 번에 두 언어를 적어 둔다.
++ *  - 화면(렌더러·웹·안드로이드): window.Lang.type 을 따라간다 (언어를 바꾸면 Lang 이 바뀐다)
++ *  - 메인 프로세스(Windows): window 가 없으므로 렌더러가 알려 준 값(setMainLang)을 쓴다
++ * 한국어가 아닌 언어(en, jp, vn …)는 모두 English 문구를 쓴다.
++ */
++export type LocalLang = 'ko' | 'en';
++
++let mainLang: LocalLang = 'ko';
++// 앱 설정(언어 선택)이 알려진 뒤에는 그 값을 최우선으로 쓴다 (window.Lang 은 다시 불러오기 전까지 이전 언어일 수 있다)
++let explicit = false;
++
++export function setMainLang(lang?: string) {
++    mainLang = lang === 'ko' || !lang ? 'ko' : 'en';
++    explicit = true;
++}
++
++export function currentLang(): LocalLang {
++    if (explicit) {
++        return mainLang;
++    }
++    const w: any = typeof window !== 'undefined' ? window : undefined;
++    const type = w && w.Lang && (w.Lang.type || w.Lang.fallbackType);
++    if (type) {
++        return type === 'ko' ? 'ko' : 'en';
++    }
++    return mainLang;
++}
++
++export function isEnglish() {
++    return currentLang() === 'en';
++}
++
++/** 현재 언어에 맞는 문구를 고른다 */
++export function lt(ko: string, en: string): string {
++    return currentLang() === 'en' ? en : ko;
++}
 diff --git a/src/main/cloudDrive.ts b/src/main/cloudDrive.ts
 new file mode 100644
-index 00000000..9673de3c
+index 00000000..287dbd28
 --- /dev/null
 +++ b/src/main/cloudDrive.ts
 @@ -0,0 +1,396 @@
@@ -9692,10 +9684,10 @@ index fd44b8ce..841f484e 100644
          }
 diff --git a/src/main/entryAccount.ts b/src/main/entryAccount.ts
 new file mode 100644
-index 00000000..06b2a274
+index 00000000..e40da3a9
 --- /dev/null
 +++ b/src/main/entryAccount.ts
-@@ -0,0 +1,524 @@
+@@ -0,0 +1,542 @@
 +import { lt, setMainLang } from '../common/localLang';
 +import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
 +import path from 'path';
@@ -10010,11 +10002,16 @@ index 00000000..06b2a274
 + * 결과: { projectId, saved, failed }
 + */
 +let saveInProgress: Promise<{ projectId?: string; saved?: boolean; failed?: boolean }> | undefined;
++/** [entry-local] 진행 중인 계정 저장을 멈춘다 (대기 창의 [취소]) */
++let cancelCurrentSave: (() => void) | undefined;
++let cancelRequested = false; // 숨은 창이 준비되기 전에 [취소]를 누른 경우
++
 +function saveViaSite(project: any, options: { entryProjectId?: string; name: string }) {
 +    requireUser();
 +    if (saveInProgress) {
 +        return saveInProgress;
 +    }
++    cancelRequested = false;
 +    saveInProgress = (async () => {
 +        const tmp = path.join(tmpDir(), `${Date.now()}`, 'entry-local-project.ent');
 +        await fs.ensureDir(path.dirname(tmp));
@@ -10049,6 +10046,11 @@ index 00000000..06b2a274
 +                    resolve(r);
 +                };
 +                const timer = setTimeout(() => finish({ failed: true }), 90000);
++                cancelCurrentSave = () => finish({}); // 취소: 저장도 실패도 아님
++                if (cancelRequested) {
++                    finish({});
++                    return;
++                }
 +                const onUrl = (url: string) => {
 +                    if (!isEntryPageAfterLogin(url, BASE)) {
 +                        // 로그인 화면으로 돌려보내짐 = 엔트리 세션 만료
@@ -10080,6 +10082,7 @@ index 00000000..06b2a274
 +                win.loadURL(entryWorkspaceUrl(undefined, BASE)).catch(() => finish({ failed: true }));
 +            });
 +        } finally {
++            cancelCurrentSave = undefined;
 +            if (!win.isDestroyed()) {
 +                win.destroy();
 +            }
@@ -10202,6 +10205,13 @@ index 00000000..06b2a274
 +ipcMain.handle('entry:load', wrap((projectId, name) => loadProject(projectId, name)));
 +ipcMain.handle('entry:saveViaSite', wrap((project, options) => saveViaSite(project, options)));
 +ipcMain.handle('entry:share', wrap((projectId) => shareProject(projectId)));
++ipcMain.handle(
++    'entry:cancelSave',
++    wrap(async () => {
++        cancelRequested = true;
++        cancelCurrentSave && cancelCurrentSave();
++    })
++);
 +ipcMain.handle('entry:base', wrap(() => BASE));
 +ipcMain.handle('entryLocal:setLang', wrap((lang) => setMainLang(lang)));
 +ipcMain.handle(
@@ -10220,6 +10230,27 @@ index 00000000..06b2a274
 +        await shell.openExternal(url);
 +    })
 +);
+diff --git a/src/main/fileUtils.ts b/src/main/fileUtils.ts
+index dc396cd4..3af6a627 100644
+--- a/src/main/fileUtils.ts
++++ b/src/main/fileUtils.ts
+@@ -9,6 +9,7 @@ import ffmpeg from 'fluent-ffmpeg';
+ import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+ import ffprobeInstaller from '@ffprobe-installer/ffprobe';
+ import Constants from './constants';
++import { lt } from '../common/localLang';
+ import get from 'lodash/get';
+ 
+ type tarCreateOption = FileOptions & CreateOptions;
+@@ -301,7 +302,7 @@ export default class {
+                 const { format = {} } = probeData;
+                 const { format_name: formatName } = format;
+                 if (isExtCheck && formatName !== 'mp3') {
+-                    return reject(new Error('업로드 파일이 MP3 파일이 아닙니다.'));
++                    return reject(new Error(lt('업로드 파일이 MP3 파일이 아닙니다.', 'The uploaded file is not an MP3 file.')));
+                 }
+                 resolve(probeData);
+             });
 diff --git a/src/main/ipcMainHelper.ts b/src/main/ipcMainHelper.ts
 index 5983999c..ad897155 100644
 --- a/src/main/ipcMainHelper.ts
@@ -10236,7 +10267,7 @@ index 5983999c..ad897155 100644
  const logger = createLogger('main/ipcMainHelper.ts');
 diff --git a/src/main/localProjectStore.ts b/src/main/localProjectStore.ts
 new file mode 100644
-index 00000000..6a983139
+index 00000000..04425a78
 --- /dev/null
 +++ b/src/main/localProjectStore.ts
 @@ -0,0 +1,219 @@
@@ -10720,7 +10751,7 @@ index 00000000..5276766f
 +    </body>
 +</html>
 diff --git a/src/preload/nativeMenu.ts b/src/preload/nativeMenu.ts
-index 12e1e85b..9ce14ba8 100644
+index 12e1e85b..88f553e5 100644
 --- a/src/preload/nativeMenu.ts
 +++ b/src/preload/nativeMenu.ts
 @@ -15,8 +15,15 @@ const getTemplate = function() {
@@ -10941,7 +10972,7 @@ index 0fa6192c..c4aa15ad 100644
 +    min-width: 0 !important;
 +}
 diff --git a/src/renderer/components/header.tsx b/src/renderer/components/header.tsx
-index e7ca0a84c..955e0206d 100644
+index e7ca0a84..6c46c92a 100644
 --- a/src/renderer/components/header.tsx
 +++ b/src/renderer/components/header.tsx
 @@ -12,6 +12,24 @@ import ImportToggleHelper from '../helper/importToggleHelper';
@@ -11426,7 +11457,7 @@ index e7ca0a84c..955e0206d 100644
              </header>
          );
 diff --git a/src/renderer/components/workspace.tsx b/src/renderer/components/workspace.tsx
-index 32eb38dd..97c297a8 100644
+index 32eb38dd..a473b64f 100644
 --- a/src/renderer/components/workspace.tsx
 +++ b/src/renderer/components/workspace.tsx
 @@ -1,5 +1,5 @@
@@ -11436,7 +11467,7 @@ index 32eb38dd..97c297a8 100644
  import './workspace.scss';
  import '../resources/styles/fonts.scss';
  import { connect } from 'react-redux';
-@@ -23,6 +23,52 @@ import { IMapDispatchToProps, IMapStateToProps } from '../store';
+@@ -23,6 +23,54 @@ import { IMapDispatchToProps, IMapStateToProps } from '../store';
  import DragAndDropContainer from './DragAndDropContainer';
  import EntryModalHelper from '../helper/entry/entryModalHelper';
  import ipcRendererHelper from '../helper/ipcRendererHelper';
@@ -11472,6 +11503,8 @@ index 32eb38dd..97c297a8 100644
 +} from '../helper/cloudState';
 +import { chooseLoginMethod } from '../helper/loginChooser';
 +import { showSaveDoneAlert } from '../helper/saveDoneAlert';
++import { showSavingAlert } from '../helper/savingAlert';
++import { startEditorLabels } from '../helper/editorLabels';
 +import { lt, setMainLang, currentLang } from '../../common/localLang';
 +
 +/** [entry-local] 알림 (엔트리 화면이 아직 준비 중이면 조용히 넘어간다) */
@@ -11489,7 +11522,7 @@ index 32eb38dd..97c297a8 100644
  
  interface IProps extends IReduxDispatch, IReduxState {}
  
-@@ -34,6 +80,35 @@ class Workspace extends Component<IProps> {
+@@ -34,6 +82,35 @@ class Workspace extends Component<IProps> {
      private isFirstRender = true;
      private isSavingCanvasData = false;
      private isSaveProject = false;
@@ -11525,7 +11558,7 @@ index 32eb38dd..97c297a8 100644
      private defaultInitOption = {
          type: 'workspace',
          backpackDisable: true,
-@@ -60,7 +135,15 @@ class Workspace extends Component<IProps> {
+@@ -60,7 +137,15 @@ class Workspace extends Component<IProps> {
      };
  
      get initOption() {
@@ -11542,7 +11575,7 @@ index 32eb38dd..97c297a8 100644
      }
  
      constructor(props: Readonly<IProps>) {
-@@ -86,7 +169,10 @@ class Workspace extends Component<IProps> {
+@@ -86,7 +171,11 @@ class Workspace extends Component<IProps> {
      }
  
      componentDidMount() {
@@ -11550,11 +11583,12 @@ index 32eb38dd..97c297a8 100644
 +        // [entry-local] 업데이트 확인(서버 통신) 하지 않음
 +        // [entry-local] 자동 저장 없음: 사용자가 [저장하기]를 눌렀을 때만 저장한다
 +        startCloudState();
++        startEditorLabels(); // 모양·소리 편집기 도구 이름을 화면 언어에 맞춤
 +        this.syncMainLang();
          setTimeout(async () => {
              await this._waitFontLoad();
              try {
-@@ -108,6 +194,94 @@ class Workspace extends Component<IProps> {
+@@ -108,7 +197,129 @@ class Workspace extends Component<IProps> {
          }, 0);
      }
  
@@ -11594,10 +11628,44 @@ index 32eb38dd..97c297a8 100644
 +            let changed = false;
 +            const botFrom = toKo ? 'Entrybot' : '엔트리봇';
 +            const botTo = toKo ? '엔트리봇' : 'Entrybot';
++            // 기본 모양·소리 이름 (엔트리 기본 작품: 엔트리봇_걷기1·2 / 강아지 짖는 소리)
++            const mediaNames: Array<[string[], string[]]> = [
++                [['엔트리봇_걷기1'], ['Walking Entrybot1']],
++                [['엔트리봇_걷기2'], ['Walking Entrybot2']],
++                [['강아지 짖는 소리', '강아지 짖는소리'], ["Doggi's Bark"]],
++            ];
++            const renameMedia = (item: any) => {
++                if (!item || typeof item.name !== 'string') {
++                    return;
++                }
++                // 엔트리가 붙여 둔 두 언어 이름(label)이 있으면 그것을 따른다
++                const label = item.label;
++                if (label && label.ko && label.en) {
++                    const from = toKo ? label.en : label.ko;
++                    const to = toKo ? label.ko : label.en;
++                    if (item.name === from && from !== to) {
++                        item.name = to;
++                        changed = true;
++                        return;
++                    }
++                }
++                for (const [ko, en] of mediaNames) {
++                    if ((toKo ? en : ko).indexOf(item.name) >= 0) {
++                        item.name = toKo ? ko[0] : en[0];
++                        changed = true;
++                        return;
++                    }
++                }
++            };
 +            (project.objects || []).forEach((object: any) => {
 +                if (object && object.name === botFrom) {
 +                    object.name = botTo;
 +                    changed = true;
++                }
++                const sprite = object && object.sprite;
++                if (sprite) {
++                    (sprite.pictures || []).forEach(renameMedia);
++                    (sprite.sounds || []).forEach(renameMedia);
 +                }
 +            });
 +            const sceneWord = toKo ? '장면' : 'Scene';
@@ -11649,7 +11717,17 @@ index 32eb38dd..97c297a8 100644
 +        }
          if (
              prevProps.common.projectName &&
-@@ -162,6 +336,14 @@ class Workspace extends Component<IProps> {
+             prevProps.common.projectName !== this.props.common.projectName
+@@ -140,7 +351,7 @@ class Workspace extends Component<IProps> {
+         const addEventListener = Entry.addEventListener.bind(Entry);
+ 
+         addEventListener('openBackPack', () => {
+-            ModalHelper.getAlertModal(RendererUtils.getLang('[다국어미적용]\n온라인에서 사용가능'));
++            ModalHelper.getAlertModal(lt('나의 보관함은 온라인 엔트리에서만 쓸 수 있습니다.', 'The backpack is only available in online Entry.'));
+         });
+         // 교과형에서 하드웨어가 바뀔때 마다 카테고리 변화
+         addEventListener('hwChanged', this.handleHardwareChange);
+@@ -162,6 +373,14 @@ class Workspace extends Component<IProps> {
          addEventListener('saveAsWorkspace', () => {
              this.handleSaveAction('saveAs');
          });
@@ -11664,7 +11742,7 @@ index 32eb38dd..97c297a8 100644
          addEventListener('saveCanvasImage', (data: any) => {
              this.handleCanvasImageSave(data);
          });
-@@ -373,6 +555,10 @@ class Workspace extends Component<IProps> {
+@@ -373,6 +592,10 @@ class Workspace extends Component<IProps> {
          const project = Entry.exportProject();
          if (project) {
              project.name = this._getProjectName();
@@ -11675,7 +11753,7 @@ index 32eb38dd..97c297a8 100644
              Object.assign(project, option);
              LocalStorageManager.saveProject(project);
          }
-@@ -438,78 +624,437 @@ class Workspace extends Component<IProps> {
+@@ -438,78 +661,455 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -11686,6 +11764,9 @@ index 32eb38dd..97c297a8 100644
 +     * - export  : .ent 파일로 내보내기 (USB·다른 PC 이동용)
 +     */
      handleSaveAction = async (key: string) => {
+-        const { persist } = this.props;
+-        const { mode } = persist;
+-        const projectName = this._getProjectName();
 +        if (key === 'export') {
 +            await this.exportToFile();
 +            return;
@@ -11720,7 +11801,9 @@ index 32eb38dd..97c297a8 100644
 +            await this.saveToLocalStore({ asNew: true, silent: false });
 +        }
 +    };
-+
+ 
+-        const saveFunction = async (filePath: string | undefined) => {
+-            if (!filePath) {
 +    /**
 +     * [entry-local] 엔트리 계정에 저장 (자동)
 +     * 엔트리 작업 화면을 가려 둔 채 앱이 불러오기·저장하기를 대신 눌러 준다.
@@ -11737,15 +11820,33 @@ index 32eb38dd..97c297a8 100644
 +        }
 +        if (!state.entry) {
 +            if (!(await this.handleAccountAction('login_entry'))) {
-+                return;
-+            }
+                 return;
+             }
 +        }
 +        const name = this._getProjectName();
 +        this.isSaveProject = true;
 +        try {
 +            Entry.engine && !Entry.engine.isState('stop') && Entry.engine.toggleStop();
 +            const project = this._exportCurrentProject();
-+            const result = await entryApi.saveViaSite(project, { entryProjectId: this.entryProjectId, name });
++            // 저장하는 동안 대기 창 (저장 완료 창과 같은 모양, [취소] 가능)
++            let cancelled = false;
++            const waiting = showSavingAlert({
++                onCancel: () => {
++                    // 누르는 즉시 창을 닫고, 뒤에서 돌던 저장도 멈춘다
++                    cancelled = true;
++                    waiting.close();
++                    entryApi.cancelSave().catch(() => undefined);
++                },
++            });
++            let result: { projectId?: string; saved?: boolean; failed?: boolean };
++            try {
++                result = await entryApi.saveViaSite(project, { entryProjectId: this.entryProjectId, name });
++            } finally {
++                waiting.close();
++            }
++            if (cancelled && result && !result.saved) {
++                result = {}; // 취소 → '저장을 취소했습니다'
++            }
 +            if (result && result.projectId) {
 +                this.entryProjectId = result.projectId;
 +                this.saveTarget = 'entry';
@@ -11778,7 +11879,13 @@ index 32eb38dd..97c297a8 100644
 +            this.isSaveProject = false;
 +        }
 +    };
-+
+ 
+-            this.showModalProgress(
+-                'progress',
+-                RendererUtils.getLang('Workspace.saving_msg'),
+-                RendererUtils.getLang('Workspace.fail_contact_msg'),
+-                { width: 220 }
+-            );
 +    /** [entry-local] 구글 드라이브에 저장 */
 +    saveToDrive = async ({ asNew }: { asNew: boolean }) => {
 +        if (this.isSaveProject) {
@@ -11828,7 +11935,18 @@ index 32eb38dd..97c297a8 100644
 +            window.removeEventListener('beforeunload', this.handleBeforeSaveProject);
 +        }
 +    };
-+
+ 
+-            try {
+-                window.addEventListener('beforeunload', this.handleBeforeSaveProject);
+-                this.isSaveProject = true;
+-
+-                // 프로젝트를 가져온다. 프로젝트 명과 워크스페이스 모드를 주입한다.
+-                Entry.stage.handle.setVisible(false);
+-                Entry.stage.update();
+-                const project = Entry.exportProject();
+-                project.isPracticalCourse = mode === 'practical_course';
+-                project.name = projectName;
+-                project.parent = this.projectParent;
 +    /** [entry-local] 계정: 로그인(방법 선택) / 로그아웃 / 드라이브·엔트리 페이지 열기 */
 +    handleAccountAction = async (key: AccountAction): Promise<boolean> => {
 +        const isCancel = (err: any) => /닫았습니다|CANCELLED|취소|closed|cancel/i.test(String((err && err.message) || err || ''));
@@ -11919,10 +12037,13 @@ index 32eb38dd..97c297a8 100644
 +                }
 +        }
 +    };
-+
+ 
+-                await IpcRendererHelper.saveProject(project, filePath);
+-                await RendererUtils.clearTempProject({ saveTemp: true });
+-                this.projectSavedPath = filePath;
 +    _exportCurrentProject() {
-         const { persist } = this.props;
-         const { mode } = persist;
++        const { persist } = this.props;
++        const { mode } = persist;
 +
 +        Entry.stage.handle.setVisible(false);
 +        Entry.stage.update();
@@ -11938,16 +12059,14 @@ index 32eb38dd..97c297a8 100644
 +        if (this.isSaveProject) {
 +            return;
 +        }
-         const projectName = this._getProjectName();
++        const projectName = this._getProjectName();
 +        if (!silent) {
 +            this.showModalProgress('progress', RendererUtils.getLang('Workspace.saving_msg'), '', {
 +                width: 220,
 +            });
 +        }
  
--        const saveFunction = async (filePath: string | undefined) => {
--            if (!filePath) {
--                return;
+-                // 모달 해제 후 엔트리 토스트로 저장처리
 +        try {
 +            window.addEventListener('beforeunload', this.handleBeforeSaveProject);
 +            this.isSaveProject = true;
@@ -11961,7 +12080,7 @@ index 32eb38dd..97c297a8 100644
 +            this.localProjectId = meta.id;
 +            if (!silent) {
 +                this.saveTarget = 'local';
-             }
++            }
 +            if (meta.name !== projectName) {
 +                this.props.CommonActions.changeProjectName(meta.name);
 +            }
@@ -11970,31 +12089,7 @@ index 32eb38dd..97c297a8 100644
 +            // 정식 저장이 끝났으므로 비정상 종료 복구용 임시본은 비운다 (원본 동작과 동일)
 +            this.handleStorageProjectSave.cancel();
 +            LocalStorageManager.clearSavedProject();
- 
--            this.showModalProgress(
--                'progress',
--                RendererUtils.getLang('Workspace.saving_msg'),
--                RendererUtils.getLang('Workspace.fail_contact_msg'),
--                { width: 220 }
--            );
--
--            try {
--                window.addEventListener('beforeunload', this.handleBeforeSaveProject);
--                this.isSaveProject = true;
--
--                // 프로젝트를 가져온다. 프로젝트 명과 워크스페이스 모드를 주입한다.
--                Entry.stage.handle.setVisible(false);
--                Entry.stage.update();
--                const project = Entry.exportProject();
--                project.isPracticalCourse = mode === 'practical_course';
--                project.name = projectName;
--                project.parent = this.projectParent;
--
--                await IpcRendererHelper.saveProject(project, filePath);
--                await RendererUtils.clearTempProject({ saveTemp: true });
--                this.projectSavedPath = filePath;
--
--                // 모달 해제 후 엔트리 토스트로 저장처리
++
 +            if (!silent) {
                  this.hideModalProgress();
 -                Entry.stateManager.addStamp();
@@ -12165,7 +12260,7 @@ index 32eb38dd..97c297a8 100644
      };
  
      handleFileAction = async (type: string) => {
-@@ -518,6 +1063,10 @@ class Workspace extends Component<IProps> {
+@@ -518,6 +1118,10 @@ class Workspace extends Component<IProps> {
                  await RendererUtils.clearTempProject();
                  await this.loadProject();
              }
@@ -12176,7 +12271,7 @@ index 32eb38dd..97c297a8 100644
          } else if (type === 'open_offline') {
              this._loadProjectFromFile(
                  () =>
-@@ -576,11 +1125,33 @@ class Workspace extends Component<IProps> {
+@@ -576,11 +1180,33 @@ class Workspace extends Component<IProps> {
          let projectWorkspaceMode = currentWorkspaceMode;
  
          if (project) {
@@ -12210,7 +12305,7 @@ index 32eb38dd..97c297a8 100644
              delete this.projectSavedPath;
              delete this.projectParent;
              CommonActions.changeProjectName(RendererUtils.getDefaultProjectName());
-@@ -602,8 +1173,14 @@ class Workspace extends Component<IProps> {
+@@ -602,8 +1228,14 @@ class Workspace extends Component<IProps> {
          }
          Entry.reloadBlock();
          this.isFirstRender = false;
@@ -12225,7 +12320,7 @@ index 32eb38dd..97c297a8 100644
          try {
              if (project) {
                  await Entry.loadExternalModules(project);
-@@ -633,9 +1210,38 @@ class Workspace extends Component<IProps> {
+@@ -633,9 +1265,38 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -12264,7 +12359,7 @@ index 32eb38dd..97c297a8 100644
          await this.loadProject(project);
      };
  
-@@ -717,6 +1323,8 @@ class Workspace extends Component<IProps> {
+@@ -717,6 +1378,8 @@ class Workspace extends Component<IProps> {
                          onFileAction={this.handleFileAction}
                          onReloadProject={this.reloadProject}
                          onLoadProject={this.loadProject}
@@ -12275,10 +12370,10 @@ index 32eb38dd..97c297a8 100644
                          executionStatus={executionStatus}
 diff --git a/src/renderer/helper/cloudState.ts b/src/renderer/helper/cloudState.ts
 new file mode 100644
-index 000000000..d2b416f86
+index 00000000..5084efa3
 --- /dev/null
 +++ b/src/renderer/helper/cloudState.ts
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,201 @@
 +/**
 + * [entry-local] 구글 드라이브·엔트리 계정 로그인 상태 + 인터넷 연결 상태
 + * 상단 메뉴·내 작품 창·저장 메뉴가 같이 쓴다.
@@ -12438,6 +12533,7 @@ index 000000000..d2b416f86
 +    saveViaSite: (project: any, options: { entryProjectId?: string; name: string }) =>
 +        window.ipcInvoke<{ projectId?: string; saved?: boolean; failed?: boolean }>('entry:saveViaSite', project, options),
 +    share: (projectId: string) => window.ipcInvoke<{ shared?: boolean }>('entry:share', projectId),
++    cancelSave: () => window.ipcInvoke<void>('entry:cancelSave'),
 +};
 +
 +export const accountApi = {
@@ -12478,6 +12574,86 @@ index 000000000..d2b416f86
 +        return lt('구글 드라이브 저장 공간이 부족합니다.', 'Google Drive storage is full.');
 +    }
 +    return msg || lt('알 수 없는 오류', 'Unknown error');
++}
+diff --git a/src/renderer/helper/editorLabels.ts b/src/renderer/helper/editorLabels.ts
+new file mode 100644
+index 00000000..e50cfc19
+--- /dev/null
++++ b/src/renderer/helper/editorLabels.ts
+@@ -0,0 +1,74 @@
++/**
++ * [entry-local] 모양 편집기(entry-paint)·소리 편집기에 한국어로 박혀 있는 도구 이름을 화면 언어에 맞춘다.
++ * (편집기 꾸러미가 언어 설정을 따르지 않고 한국어 이름을 그대로 쓴다 — 마우스를 올리면·화면 읽기에 나온다)
++ */
++import { currentLang } from '../../common/localLang';
++
++const PAIRS: Array<[string, string]> = [
++    // 모양 편집기 도구
++    ['이동', 'Move'],
++    ['선택', 'Select'],
++    ['패스', 'Path'],
++    ['붓', 'Brush'],
++    ['선', 'Line'],
++    ['사각', 'Rectangle'],
++    ['문자', 'Text'],
++    ['채우기', 'Fill'],
++    ['지우개', 'Eraser'],
++    // 소리 편집기 (화면 읽기용 이름)
++    ['선택됨', 'Selected'],
++    ['재생하기', 'Play'],
++    ['소리길이', 'Sound length'],
++    ['감소', 'Decrease'],
++    ['증가', 'Increase'],
++    ['남기기', 'Keep'],
++    ['자르기', 'Cut'],
++];
++const TO_EN = new Map(PAIRS);
++const TO_KO = new Map(PAIRS.map(([ko, en]) => [en, ko] as [string, string]));
++
++/** 바꿔도 되는 곳: 모양 편집기 도구 버튼, 소리 편집기 안 */
++function inEditor(el: Element | null) {
++    return !!(el && el.closest && el.closest('[class*="ToolButtonWrapper"], #entrySoundEdit, .entryPlaygroundSoundEdit'));
++}
++
++function fix(root: Node) {
++    const map = currentLang() === 'en' ? TO_EN : TO_KO;
++    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
++    let node: Node | null;
++    while ((node = walker.nextNode())) {
++        const text = (node.textContent || '').trim();
++        const to = text && map.get(text);
++        if (to && inEditor(node.parentElement)) {
++            node.textContent = to;
++        }
++    }
++}
++
++let started = false;
++let pending = false;
++
++/** 앱이 켜질 때 한 번 부른다 */
++export function startEditorLabels() {
++    if (started || typeof MutationObserver === 'undefined') {
++        return;
++    }
++    started = true;
++    const run = () => {
++        pending = false;
++        try {
++            // 편집기 영역 안만 살핀다 (블록을 끄는 동안에도 가볍게)
++            document.querySelectorAll('[class*="ToolButtonWrapper"], #entrySoundEdit').forEach((el) => fix(el));
++        } catch (e) {
++            // 이름을 못 바꿔도 편집에는 영향 없음
++        }
++    };
++    new MutationObserver(() => {
++        if (!pending) {
++            pending = true;
++            // 화면이 바뀐 직후 한 번에 처리 (자주 바뀌어도 가볍게)
++            setTimeout(run, 50);
++        }
++    }).observe(document.body, { childList: true, subtree: true });
++    run();
 +}
 diff --git a/src/renderer/helper/entry/engineBoost.ts b/src/renderer/helper/entry/engineBoost.ts
 new file mode 100644
@@ -13048,7 +13224,7 @@ index 00000000..b36bcf3c
 +}
 diff --git a/src/renderer/helper/entry/performance.ts b/src/renderer/helper/entry/performance.ts
 new file mode 100644
-index 000000000..75a0dbf25
+index 00000000..75a0dbf2
 --- /dev/null
 +++ b/src/renderer/helper/entry/performance.ts
 @@ -0,0 +1,177 @@
@@ -13275,10 +13451,10 @@ index fbdd0052..13ba8c1d 100644
      }
 diff --git a/src/renderer/helper/localProjectModal.ts b/src/renderer/helper/localProjectModal.ts
 new file mode 100644
-index 00000000..d0a2470b
+index 00000000..84fea407
 --- /dev/null
 +++ b/src/renderer/helper/localProjectModal.ts
-@@ -0,0 +1,649 @@
+@@ -0,0 +1,651 @@
 +import { lt } from '../../common/localLang';
 +import IpcRendererHelper from './ipcRendererHelper';
 +import RendererUtils from './rendererUtils';
@@ -13351,11 +13527,13 @@ index 00000000..d0a2470b
 +#${ROOT_ID} .elp-close:before { transform: rotate(45deg); }
 +#${ROOT_ID} .elp-close:after { transform: rotate(-45deg); }
 +#${ROOT_ID} .elp-body { flex: 1; overflow-y: auto; padding: 16px 20px;
-+  display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; align-content: start; }
++  display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); grid-auto-rows: max-content; gap: 14px; align-content: start; }
 +#${ROOT_ID} .elp-empty { grid-column: 1 / -1; text-align: center; color: #888; padding: 60px 0; line-height: 1.7; }
 +#${ROOT_ID} .elp-empty button { margin-top: 12px; padding: 11px 24px; border: 0; border-radius: 4px; background: #4f80ff;
 +  color: #fff; font-size: 16px; font-weight: bold; cursor: pointer; }
-+#${ROOT_ID} .elp-card { border: 1px solid #e3e3e3; border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; }
++#${ROOT_ID} .elp-card { border: 1px solid #e3e3e3; border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; min-height: max-content; }
++/* 카드 안 미리보기·이름·버튼이 줄어들지 않게 (칸 높이가 미리보기만큼만 잡혀 이름·버튼이 잘리던 문제) */
++#${ROOT_ID} .elp-card > * { flex: none; }
 +#${ROOT_ID} .elp-card.current { border-color: #4f80ff; box-shadow: 0 0 0 2px rgba(79,128,255,.25); }
 +#${ROOT_ID} .elp-thumb { aspect-ratio: 16/9; background: #f2f4f7 center/cover no-repeat; cursor: pointer; }
 +#${ROOT_ID} .elp-info { padding: 8px 10px 4px; }
@@ -13930,7 +14108,7 @@ index 00000000..d0a2470b
 +}
 diff --git a/src/renderer/helper/loginAlert.ts b/src/renderer/helper/loginAlert.ts
 new file mode 100644
-index 000000000..f1c631cf3
+index 00000000..f1c631cf
 --- /dev/null
 +++ b/src/renderer/helper/loginAlert.ts
 @@ -0,0 +1,68 @@
@@ -14004,7 +14182,7 @@ index 000000000..f1c631cf3
 +}
 diff --git a/src/renderer/helper/loginChooser.ts b/src/renderer/helper/loginChooser.ts
 new file mode 100644
-index 000000000..0a07529d7
+index 00000000..0a07529d
 --- /dev/null
 +++ b/src/renderer/helper/loginChooser.ts
 @@ -0,0 +1,230 @@
@@ -14240,7 +14418,7 @@ index 000000000..0a07529d7
 +}
 diff --git a/src/renderer/helper/printProject.ts b/src/renderer/helper/printProject.ts
 new file mode 100644
-index 00000000..eac25930
+index 00000000..c589791a
 --- /dev/null
 +++ b/src/renderer/helper/printProject.ts
 @@ -0,0 +1,413 @@
@@ -14659,7 +14837,7 @@ index 00000000..eac25930
 +}
 diff --git a/src/renderer/helper/saveDoneAlert.ts b/src/renderer/helper/saveDoneAlert.ts
 new file mode 100644
-index 000000000..43b1ce911
+index 00000000..43b1ce91
 --- /dev/null
 +++ b/src/renderer/helper/saveDoneAlert.ts
 @@ -0,0 +1,71 @@
@@ -14734,6 +14912,80 @@ index 000000000..43b1ce911
 +        (overlay.querySelector('.esd-ok') as HTMLElement).focus();
 +    });
 +}
+diff --git a/src/renderer/helper/savingAlert.ts b/src/renderer/helper/savingAlert.ts
+new file mode 100644
+index 00000000..4d961edb
+--- /dev/null
++++ b/src/renderer/helper/savingAlert.ts
+@@ -0,0 +1,68 @@
++/**
++ * [entry-local] 엔트리 계정에 저장하는 동안 보이는 대기 창
++ * 저장 완료 창(saveDoneAlert.ts)·로그인 안내 창과 같은 모양:
++ *   파란 머리띠 "저장" + 진행 표시 + "엔트리 계정에 저장하는 중…" + [취소]
++ * Windows·안드로이드 모두 이 창을 쓴다. (실제 엔트리 작업 화면은 보이지 않는 곳에서 돈다)
++ */
++import { lt } from '../../common/localLang';
++
++const OVERLAY_ID = 'entry-local-saving';
++const STYLE_ID = 'entry-local-saving-style';
++
++const CSS = `
++#${OVERLAY_ID}{position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);font-family:inherit}
++#${OVERLAY_ID} .esv-box{width:388px;max-width:calc(100vw - 32px);background:#fff;border-radius:6px;overflow:hidden;box-shadow:0 6px 24px rgba(0,0,0,.25)}
++#${OVERLAY_ID} .esv-head{display:flex;align-items:center;height:54px;padding:0 26px;background:#4f80ff;color:#fff;font-size:20px;font-weight:bold}
++#${OVERLAY_ID} .esv-body{padding:34px 24px 38px;text-align:center}
++#${OVERLAY_ID} .esv-spin{width:44px;height:44px;margin:0 auto 22px;border:4px solid #dfe7ff;border-top-color:#4f80ff;border-radius:50%;box-sizing:border-box;animation:esv-rot .9s linear infinite}
++@keyframes esv-rot{to{transform:rotate(360deg)}}
++#${OVERLAY_ID} .esv-msg{margin:0 0 8px;color:#333;font-size:17px;font-weight:bold;line-height:1.4}
++#${OVERLAY_ID} .esv-sub{margin:0 0 30px;color:#888;font-size:14px;line-height:1.5}
++#${OVERLAY_ID} .esv-buttons{display:flex;justify-content:center}
++#${OVERLAY_ID} .esv-cancel{width:146px;height:48px;border:1px solid #4f80ff;border-radius:4px;background:#fff;color:#4f80ff;font:inherit;font-size:15px;font-weight:bold;cursor:pointer}
++#${OVERLAY_ID} .esv-cancel:disabled{border-color:#c9d6f7;color:#a9b9e6;cursor:default}
++`;
++
++function ensureStyle() {
++    if (!document.getElementById(STYLE_ID)) {
++        const style = document.createElement('style');
++        style.id = STYLE_ID;
++        style.textContent = CSS;
++        document.head.appendChild(style);
++    }
++}
++
++/** 대기 창을 띄운다. [취소]를 누르면 onCancel 을 부른다. 반환값의 close() 로 닫는다. */
++export function showSavingAlert(options: { onCancel?: () => void } = {}) {
++    ensureStyle();
++    document.getElementById(OVERLAY_ID)?.remove();
++    const overlay = document.createElement('div');
++    overlay.id = OVERLAY_ID;
++    overlay.innerHTML =
++        `<div class="esv-box" role="alertdialog" aria-modal="true" aria-busy="true" aria-label="${lt('저장', 'Save')}">` +
++        `<div class="esv-head">${lt('저장', 'Save')}</div>` +
++        '<div class="esv-body"><div class="esv-spin" aria-hidden="true"></div>' +
++        `<p class="esv-msg">${lt('엔트리 계정에 저장하는 중…', 'Saving to your Entry account…')}</p>` +
++        `<p class="esv-sub">${lt('잠시만 기다려 주세요. 처음에는 30초쯤 걸릴 수 있습니다.', 'Please wait. The first time may take about 30 seconds.')}</p>` +
++        `<div class="esv-buttons"><button class="esv-cancel" type="button">${lt('취소', 'Cancel')}</button></div>` +
++        '</div></div>';
++    const cancel = overlay.querySelector('.esv-cancel') as HTMLButtonElement;
++    const onKey = (e: KeyboardEvent) => {
++        if (e.key === 'Escape') {
++            e.stopPropagation();
++            cancel.click();
++        }
++    };
++    cancel.onclick = () => {
++        cancel.disabled = true;
++        options.onCancel && options.onCancel();
++    };
++    document.addEventListener('keydown', onKey, true);
++    document.body.appendChild(overlay);
++    return {
++        close() {
++            document.removeEventListener('keydown', onKey, true);
++            overlay.remove();
++        },
++    };
++}
 diff --git a/src/renderer/renderEntry.tsx b/src/renderer/renderEntry.tsx
 index 87cc6c6d..96586da0 100644
 --- a/src/renderer/renderEntry.tsx
@@ -14747,6 +14999,19 @@ index 87cc6c6d..96586da0 100644
  import makeEntryAsciiArt from './makeEntryAsciiArt';
  
  const { store, persistor } = configureStore();
+diff --git a/src/renderer/resources/lang/en.json b/src/renderer/resources/lang/en.json
+index 7461602b..cf5a6b74 100644
+--- a/src/renderer/resources/lang/en.json
++++ b/src/renderer/resources/lang/en.json
+@@ -8476,7 +8476,7 @@
+         "clock": "clock",
+         "counter_clock": "counterclock",
+         "font_size": "font size",
+-        "second": "&quot;",
++        "second": "sec",
+         "alert_title": "Alert",
+         "confirm_title": "Confirm",
+         "update_title": "Alert",
 diff --git a/src/web/bus.ts b/src/web/bus.ts
 new file mode 100644
 index 00000000..2695dcad
@@ -14775,7 +15040,7 @@ index 00000000..2695dcad
 +}
 diff --git a/src/web/cloudWeb.ts b/src/web/cloudWeb.ts
 new file mode 100644
-index 00000000..fe27e100
+index 00000000..211f9e78
 --- /dev/null
 +++ b/src/web/cloudWeb.ts
 @@ -0,0 +1,296 @@
@@ -15077,10 +15342,10 @@ index 00000000..fe27e100
 +}
 diff --git a/src/web/entryAccountWeb.ts b/src/web/entryAccountWeb.ts
 new file mode 100644
-index 00000000..b64e6f30
+index 00000000..eebe1843
 --- /dev/null
 +++ b/src/web/entryAccountWeb.ts
-@@ -0,0 +1,212 @@
+@@ -0,0 +1,220 @@
 +import { lt } from '../common/localLang';
 +import { registerPlugin } from '@capacitor/core';
 +import {
@@ -15122,6 +15387,7 @@ index 00000000..b64e6f30
 +        texts?: { [key: string]: string };
 +    }): Promise<{ projectId?: string; saved?: boolean; failed?: boolean }>;
 +    share(options: { url: string; script: string }): Promise<{ shared?: boolean }>;
++    cancelSave(): Promise<void>;
 +}
 +
 +const EntryAccount = registerPlugin<EntryAccountPlugin>('EntryAccount');
@@ -15278,6 +15544,13 @@ index 00000000..b64e6f30
 +        saved: !!(res && res.saved),
 +        failed: !!(res && res.failed),
 +    };
++}
++
++/** 진행 중인 계정 저장 멈추기 (대기 창의 [취소]) */
++export async function entryCancelSave() {
++    if (isNative()) {
++        await EntryAccount.cancelSave().catch(() => undefined);
++    }
 +}
 +
 +/** 화면 언어를 안드로이드 플러그인에 알림 (창 제목·오류 문구용) */
@@ -15715,7 +15988,7 @@ index 00000000..8ad53ede
 +}
 diff --git a/src/web/shim.ts b/src/web/shim.ts
 new file mode 100644
-index 00000000..0a285da4
+index 00000000..920248ab
 --- /dev/null
 +++ b/src/web/shim.ts
 @@ -0,0 +1,134 @@
@@ -16364,10 +16637,10 @@ index 00000000..9bd437ca
 +}
 diff --git a/src/web/webMain.ts b/src/web/webMain.ts
 new file mode 100644
-index 00000000..26ca18d7
+index 00000000..547cf070
 --- /dev/null
 +++ b/src/web/webMain.ts
-@@ -0,0 +1,969 @@
+@@ -0,0 +1,971 @@
 +import { lt } from '../common/localLang';
 +import XLSX from 'xlsx';
 +import { vfs, join, basename, extname, normalize } from './vfs';
@@ -16399,6 +16672,7 @@ index 00000000..26ca18d7
 +    entrySaveViaSite,
 +    entryShare,
 +    entrySetLang,
++    entryCancelSave,
 +} from './entryAccountWeb';
 +import {
 +    PICK,
@@ -17304,6 +17578,7 @@ index 00000000..26ca18d7
 +            return project;
 +        }),
 +    'entry:share': (projectId: string) => entryShare(projectId),
++    'entry:cancelSave': () => entryCancelSave(),
 +    'entryLocal:setLang': (lang: string) => entrySetLang(lang),
 +    'entry:saveViaSite': async (project: any, options: { entryProjectId?: string; name: string }) =>
 +        entrySaveViaSite(await serialize(() => packProject(project)), options),
