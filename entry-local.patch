@@ -465,10 +465,10 @@ index 00000000..28d6785c
 +</manifest>
 diff --git a/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
 new file mode 100644
-index 00000000..e3ac547d
+index 00000000..af7f61ba
 --- /dev/null
 +++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
-@@ -0,0 +1,959 @@
+@@ -0,0 +1,1002 @@
 +package biz.softline.entrylocal;
 +
 +import android.app.Dialog;
@@ -1085,6 +1085,9 @@ index 00000000..e3ac547d
 +        final String help = call.getString("help", "");
 +        // 자동 진행 스크립트 (작품 파일 내용 포함)
 +        final String importScript = call.getString("importScript", "");
++        // 덮어쓰기 (계정 작품 id 가 있을 때): 그 작품 작업 화면에서 overwriteScript 실행 → 안 되면 newUrl 에서 새 작품으로 저장
++        final String overwriteScript = call.getString("overwriteScript", "");
++        final String newUrl = call.getString("newUrl", "");
 +        final JSObject texts = call.getObject("texts", new JSObject());
 +        Uri target = Uri.parse(url);
 +        if (!"https".equals(target.getScheme()) || !isEntryHost(target)) {
@@ -1129,6 +1132,7 @@ index 00000000..e3ac547d
 +            final boolean[] failed = { false };
 +            final java.util.regex.Pattern WS_ID = java.util.regex.Pattern.compile("/ws/([0-9a-fA-F]{24})");
 +            final String[] startId = { null };
++            final boolean[] overwriting = { !overwriteScript.isEmpty() };
 +            final Runnable[] fail = { null };
 +            final Runnable finish = () -> {
 +                if (closed[0]) return;
@@ -1155,7 +1159,7 @@ index 00000000..e3ac547d
 +                failed[0] = true;
 +                finish.run();
 +            };
-+            main.postDelayed(fail[0], 90000);
++            main.postDelayed(fail[0], overwriteScript.isEmpty() ? 90000 : 180000);
 +            currentSaveCancel = finish; // [취소]: 저장도 실패도 아님
 +            if (cancelPending) {
 +                // 준비가 끝나기 전에 [취소]를 누름
@@ -1175,6 +1179,7 @@ index 00000000..e3ac547d
 +                    fail[0].run(); // 엔트리 세션 만료
 +                    return;
 +                }
++                if (overwriting[0]) return; // 덮어쓰기는 페이지를 옮기지 않는다 (결과는 doneOverwrite 로)
 +                java.util.regex.Matcher m = WS_ID.matcher(visited);
 +                if (!autoStarted[0] || !m.find()) return;
 +                String id = m.group(1);
@@ -1192,6 +1197,33 @@ index 00000000..e3ac547d
 +                            if (!new JSONObject(json).optBoolean("fed")) fail[0].run(); // 불러오기 메뉴를 못 찾음
 +                        } catch (Exception ignored) {
 +                            // 페이지가 이동하며 끊긴 경우 등: 이동 감지로 판단
++                        }
++                    });
++                }
++
++                @JavascriptInterface
++                public void doneOverwrite(String json) {
++                    main.post(() -> {
++                        if (closed[0]) return;
++                        JSONObject o;
++                        try {
++                            o = new JSONObject(json);
++                        } catch (Exception e) {
++                            o = new JSONObject();
++                        }
++                        if (o.optBoolean("saved")) {
++                            // 같은 작품에 덮어씀
++                            saved[0] = true;
++                            main.removeCallbacks(fail[0]);
++                            finish.run();
++                        } else if (o.optBoolean("fallback") && !newUrl.isEmpty()) {
++                            // 덮어쓸 수 없는 작품 → 새 작품으로 저장
++                            overwriting[0] = false;
++                            autoStarted[0] = false;
++                            projectId[0] = "";
++                            web.loadUrl(newUrl);
++                        } else {
++                            fail[0].run();
 +                        }
 +                    });
 +                }
@@ -1215,7 +1247,18 @@ index 00000000..e3ac547d
 +
 +                @Override
 +                public void onPageFinished(WebView view, String loaded) {
-+                    if (autoStarted[0] || importScript.isEmpty() || closed[0]) return;
++                    if (autoStarted[0] || closed[0]) return;
++                    if (overwriting[0]) {
++                        autoStarted[0] = true;
++                        view.evaluateJavascript(
++                            "Promise.resolve().then(() => " + overwriteScript + ")" +
++                            ".then((r) => EntryLocalSave.doneOverwrite(JSON.stringify(r || {})))" +
++                            ".catch(() => EntryLocalSave.doneOverwrite('{}'));",
++                            null
++                        );
++                        return;
++                    }
++                    if (importScript.isEmpty()) return;
 +                    autoStarted[0] = true;
 +                    java.util.regex.Matcher m = WS_ID.matcher(loaded == null ? "" : loaded);
 +                    startId[0] = m.find() ? m.group(1) : null;
@@ -7943,10 +7986,10 @@ index dc07af56..8c75ef68 100644
          "dist:mac": "cross-env NODE_ENV=production NODE_OPTIONS=--openssl-legacy-provider webpack && cross-env NOTARIZE=false electron-builder -c --mac",
 diff --git a/scripts/mock-entry.js b/scripts/mock-entry.js
 new file mode 100644
-index 00000000..7fe0ec66
+index 00000000..f746e5ef
 --- /dev/null
 +++ b/scripts/mock-entry.js
-@@ -0,0 +1,227 @@
+@@ -0,0 +1,297 @@
 +#!/usr/bin/env node
 +/**
 + * [entry-local] 시험용 가짜 엔트리(playentry.org) 서버
@@ -7970,10 +8013,12 @@ index 00000000..7fe0ec66
 +    { id: '6500000000000000000000a1', name: '계정 작품 하나', thumb: '/uploads/thumb/a1.png', created: '2026-10-01T01:00:00.000Z', updated: '2026-10-18T10:00:00.000Z', isopen: true },
 +    { id: '6500000000000000000000a2', name: '비공개 연습', thumb: null, created: '2026-10-02T01:00:00.000Z', updated: '2026-10-17T10:00:00.000Z', isopen: false },
 +];
++// 남의 작품 (덮어쓰기 대신 새 작품으로 저장되어야 함) — 목록에는 안 나온다
++const FOREIGN = { id: '6500000000000000000000f9', name: '남의 작품', thumb: null, created: '2026-10-01T01:00:00.000Z', updated: '2026-10-01T01:00:00.000Z', isopen: true, owner: '64f0c0ffee0000000000ffff' };
 +const PNG_1PX = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
 +// 실제 엔트리 작업 화면 구조 (2026-10-22 확인): 아이콘 버튼 글자 file/save/help, 메뉴는 약 1초 뒤 표시,
 +// 늘 있는 input[type=file][accept=.ent], 오프라인 작품 불러오기 = 계정에 새 작품 생성 후 /ws/<새 id> 로 이동
-+const wsPage = (id) => `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>작품 만들기 : 엔트리</title><meta name="csrf-token" content="mock-csrf">
++const wsPage = (id, owner) => `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>작품 만들기 : 엔트리</title><meta name="csrf-token" content="mock-csrf">
 +<style>body{font-family:sans-serif;margin:0} header{height:48px;background:#4f80ff;display:flex;align-items:center;gap:10px;padding:0 16px;color:#fff}
 +button.icon{width:48px;height:32px;border:0;border-radius:16px;background:#fff3;color:transparent;font-size:1px}
 +.dd{position:absolute;top:44px;left:300px;background:#fff;color:#222;border:1px solid #ccc} .dd div{padding:10px 18px;cursor:pointer}</style></head>
@@ -7999,6 +8044,14 @@ index 00000000..7fe0ec66
 +    document.getElementById('shOk').onclick = async () => { await fetch('/_mock/shared', { method: 'POST' }); location.href = '/discovery/project/' + pid; };
 +  },
 +  hideShareProject(e) {},
++  // 덮어쓰기 저장에 쓰는 것들 (실제 엔트리 작업 공간 관리자와 같은 이름)
++  isLogined: true,
++  projectId: ${JSON.stringify(id || undefined)},
++  user: ${JSON.stringify(USER)},
++  projectData: { user: { id: ${JSON.stringify(owner || USER.id)} } },
++  async reloadEntry(content) { current = content; window.Entry.exportProject = () => current; },
++  async saveProject() { await fetch('/_mock/update', { method: 'POST', body: JSON.stringify({ id: this.projectId, content: current }) }); },
++  alertProjectSaveError() {},
 +};
 +document.getElementById('__next') || (() => { const n = document.createElement('div'); n.id = '__next'; document.body.appendChild(n); })();
 +document.getElementById('__next')['__reactContainer$mock'] = { stateNode: { current: { memoizedProps: {}, child: { memoizedProps: { value: ctrl }, child: null, sibling: null }, sibling: null } } };
@@ -8069,6 +8122,65 @@ index 00000000..7fe0ec66
 +        });
 +        return;
 +    }
++    if (url.pathname === '/rest/project/upload' && req.method === 'POST') {
++        // 실제 엔트리: 로그인 상태면 올린 .ent 로 계정에 작품을 만들고 { _id } 를 돌려준다
++        let size = 0;
++        req.on('data', (c) => (size += c.length));
++        req.on('end', () => {
++            if (!sessionOf(req) || req.headers['csrf-token'] !== 'mock-csrf') {
++                res.writeHead(401, { 'Content-Type': 'application/json' });
++                return res.end('{"message":"unauthorized"}');
++            }
++            counters.restUploads = (counters.restUploads || 0) + 1;
++            const id = crypto.randomBytes(12).toString('hex');
++            PROJECTS.unshift({ id, name: '임시 작품', thumb: null, created: new Date().toISOString(), updated: new Date().toISOString(), isopen: false, temp: true, size });
++            res.writeHead(200, { 'Content-Type': 'application/json' });
++            res.end(JSON.stringify({ _id: id }));
++        });
++        return;
++    }
++    if ((url.pathname === '/graphql/SELECT_PROJECT' || url.pathname === '/graphql/DELETE_PROJECT') && req.method === 'POST') {
++        let body = '';
++        req.on('data', (c) => (body += c));
++        req.on('end', () => {
++            if (!sessionOf(req)) {
++                res.writeHead(401, { 'Content-Type': 'application/json' });
++                return res.end('{"errors":[{"message":"unauthorized"}]}');
++            }
++            const j = JSON.parse(body || '{}');
++            const id = j.variables && j.variables.id;
++            const p = PROJECTS.find((x) => x.id === id);
++            res.writeHead(200, { 'Content-Type': 'application/json' });
++            if (url.pathname.endsWith('DELETE_PROJECT')) {
++                if (p) PROJECTS.splice(PROJECTS.indexOf(p), 1);
++                counters.deleted = (counters.deleted || 0) + 1;
++                return res.end(JSON.stringify({ data: { deleteProject: { status: p ? 200 : 404, result: !!p } } }));
++            }
++            if (!p) return res.end('{"data":{"project":null}}');
++            res.end(JSON.stringify({ data: { project: { id: p.id, name: p.name, updated: p.updated, speed: 60, objects: [{ id: 'uploaded-' + p.id }], variables: [], messages: [], functions: [], scenes: [{ id: 's1', name: '장면 1' }] } } }));
++        });
++        return;
++    }
++    if (url.pathname === '/_mock/update' && req.method === 'POST') {
++        let body = '';
++        req.on('data', (c) => (body += c));
++        req.on('end', () => {
++            const j = JSON.parse(body || '{}');
++            const p = PROJECTS.find((x) => x.id === j.id);
++            if (p) {
++                p.updated = new Date(Date.now() + 1000).toISOString();
++                p.content = j.content;
++            }
++            counters.updates = (counters.updates || 0) + 1;
++            res.writeHead(200, { 'Content-Type': 'application/json' });
++            res.end('{}');
++        });
++        return;
++    }
++    if (url.pathname === '/_mock/project') {
++        res.writeHead(200, { 'Content-Type': 'application/json' });
++        return res.end(JSON.stringify(PROJECTS.find((x) => x.id === url.searchParams.get('id')) || null));
++    }
 +    if (url.pathname === '/_mock/uploads') {
 +        res.writeHead(200, { 'Content-Type': 'application/json' });
 +        return res.end(JSON.stringify({ uploads, counters }));
@@ -8120,7 +8232,8 @@ index 00000000..7fe0ec66
 +        if (id !== 'new' && !sessionOf(req)) {
 +            return send(302, '', { Location: '/signin' });
 +        }
-+        return send(200, wsPage(id === 'new' ? '' : id));
++        const proj = PROJECTS.find((x) => x.id === id) || (id === FOREIGN.id ? FOREIGN : undefined);
++        return send(200, wsPage(id === 'new' ? '' : id, proj && proj.owner));
 +    }
 +    if (url.pathname === '/_mock/expire') {
 +        sessions.clear();
@@ -8567,7 +8680,7 @@ index 00000000..86986717
 +}
 diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
 new file mode 100644
-index 00000000..01bd0689
+index 00000000..9986b556
 --- /dev/null
 +++ b/src/common/buildInfo.ts
 @@ -0,0 +1,5 @@
@@ -8575,7 +8688,7 @@ index 00000000..01bd0689
 + * [entry-local] 패치 버전 — 내 작품 창 아래에 표시된다.
 + * 태블릿·PC 에 설치된 앱이 최신 패치로 빌드된 것인지 확인하는 용도. 패치를 낼 때마다 올린다.
 + */
-+export const ENTRY_LOCAL_BUILD = '2026.10.22-f'; // 영어 마무리 · 내 작품 카드 · 계정 저장 대기 창
++export const ENTRY_LOCAL_BUILD = '2026.10.22-h'; // 파일에서 연 작품 원래 파일에 덮어쓰기
 diff --git a/src/common/driveClient.ts b/src/common/driveClient.ts
 new file mode 100644
 index 00000000..92f01770
@@ -8918,10 +9031,10 @@ index 00000000..92f01770
 +}
 diff --git a/src/common/entryAccount.ts b/src/common/entryAccount.ts
 new file mode 100644
-index 00000000..40990e28
+index 00000000..714f8a76
 --- /dev/null
 +++ b/src/common/entryAccount.ts
-@@ -0,0 +1,298 @@
+@@ -0,0 +1,400 @@
 +/**
 + * [entry-local] 엔트리(playentry.org) 계정 — Windows·안드로이드 공통 상수
 + *
@@ -9185,6 +9298,108 @@ index 00000000..40990e28
 +/* 엔트리 자체의 '작품 공유하기' 패널(제목·카테고리·미리보기·공유하기)을 연다.            */
 +/* window.__elShare: 'open' → 'cancel'(취소·닫기) / 공유가 끝나면 엔트리가 다른 페이지로 이동 */
 +/* ------------------------------------------------------------------ */
++/**
++ * 엔트리 계정 작품에 '덮어쓰기' 저장 — 작업 화면(/ws/<targetId>)에서 실행한다. 페이지를 옮기지 않는다.
++ *  1) .ent 를 엔트리 '오프라인 작품 불러오기'와 같은 주소(/rest/project/upload)로 올린다 → 모양·소리가 엔트리에 올라간다
++ *     (로그인 상태면 엔트리가 임시 작품을 하나 만든다)
++ *  2) 임시 작품 내용을 읽어 지금 열린 작품(targetId)에 넣고(reloadEntry) 엔트리 자체 [저장하기](saveProject → UPDATE_PROJECT)
++ *  3) 임시 작품은 지운다 (DELETE_PROJECT)
++ * 결과 { fed, saved, reason? } — fallback: true 면 덮어쓸 수 없는 작품(남의 작품·없어진 작품) → 새 작품으로 저장
++ */
++export function overwriteScript(entBase64: string, targetId: string) {
++    return `(async () => {
++  ${HEADERS_FN}
++  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
++  const gql = async (name, query, variables) => {
++    const res = await fetch('/graphql/' + name, { method: 'POST', credentials: 'include', headers: __entryHeaders(), body: JSON.stringify({ operationName: name, query, variables }) });
++    const j = await res.json().catch(() => ({}));
++    if (!res.ok || (j.errors && j.errors.length)) throw new Error(name + ' ' + res.status + ' ' + ((j.errors && j.errors[0] && j.errors[0].message) || ''));
++    return j.data || {};
++  };
++  const updatedOf = async (id) => {
++    try { const d = await gql('SELECT_PROJECT', 'query SELECT_PROJECT($id: ID! $groupId: ID) { project(id: $id, groupId: $groupId) { id updated } }', { id }); return d.project && d.project.updated; } catch (e) { return undefined; }
++  };
++  const t0 = Date.now();
++  while (Date.now() - t0 < 60000) {
++    const E = window.Entry;
++    if (E && E.container && E.playground && E.engine) break;
++    await sleep(400);
++  }
++  await sleep(1500);
++  document.querySelectorAll('.tooltipGuide .close').forEach((c) => { try { c.click(); } catch (e) {} });
++  const root = document.getElementById('__next');
++  const key = root && Object.keys(root).find((k) => k.startsWith('__reactContainer'));
++  let start = key && root[key];
++  if (start && start.stateNode && start.stateNode.current) start = start.stateNode.current;
++  let ctrl = null;
++  const stack = [start];
++  for (let n = 0; stack.length && n < 50000 && !ctrl; n++) {
++    const f = stack.pop();
++    if (!f) continue;
++    const v = f.memoizedProps && f.memoizedProps.value;
++    if (v && typeof v === 'object' && typeof v.saveProject === 'function' && typeof v.reloadEntry === 'function') ctrl = v;
++    if (f.child) stack.push(f.child);
++    if (f.sibling) stack.push(f.sibling);
++  }
++  if (!ctrl) return { fed: false, reason: 'no-workspace' };
++  if (!ctrl.isLogined) return { fed: false, reason: 'login' };
++  const target = ${JSON.stringify(targetId)};
++  // 지금 열린 작품이 내 작품(targetId)인지 확인 — 아니면 덮어쓰지 않고 새 작품으로 저장
++  if (ctrl.projectId !== target) return { fed: false, fallback: true, reason: 'not-found' };
++  const owner = ctrl.projectData && ctrl.projectData.user;
++  const me = ctrl.user;
++  if (owner && me && (owner.id || owner._id) && (owner.id || owner._id) !== (me.id || me._id)) return { fed: false, fallback: true, reason: 'not-mine' };
++  const before = await updatedOf(target);
++
++  // 1) 올리기
++  const bin = atob(${JSON.stringify(entBase64)});
++  const bytes = new Uint8Array(bin.length);
++  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
++  const form = new FormData();
++  form.append('projects', new File([bytes], 'entry-local-project.ent', { type: 'application/octet-stream' }));
++  const h = __entryHeaders();
++  delete h['Content-Type'];
++  const up = await fetch('/rest/project/upload', { method: 'POST', credentials: 'include', headers: h, body: form });
++  if (!up.ok) return { fed: false, reason: 'upload-' + up.status };
++  const s = await up.json();
++  if (!s || s.errors) return { fed: false, reason: 'upload-error' };
++  let tempId = s._id || s.id && s.objects === undefined && s.id;
++  let content = s.objects ? s : null;
++  const removeTemp = async () => {
++    if (!tempId || tempId === target) return;
++    try { await gql('DELETE_PROJECT', 'mutation DELETE_PROJECT($id: ID!) { deleteProject(id: $id) { status result } }', { id: tempId }); } catch (e) {}
++  };
++  try {
++    // 2) 임시 작품 내용 읽기 (엔트리가 올린 모양·소리 주소가 들어 있다)
++    if (!content && tempId) {
++      const full = 'id name speed objects variables messages functions tables scenes cloudVariable learning expansionBlocks aiUtilizeBlocks hardwareLiteBlocks';
++      const basic = 'id name speed objects variables messages functions scenes';
++      for (const fields of [full, basic]) {
++        try {
++          const d = await gql('SELECT_PROJECT', 'query SELECT_PROJECT($id: ID! $groupId: ID) { project(id: $id, groupId: $groupId) { ' + fields + ' } }', { id: tempId });
++          if (d.project && d.project.objects) { content = d.project; break; }
++        } catch (e) {}
++      }
++    }
++    if (!content) return { fed: false, reason: 'no-content' };
++    content = Object.assign({}, content, { id: target });
++    // 3) 지금 작품에 넣고 엔트리 자체 저장 (내 작품 → 덮어쓰기)
++    let saveError = false;
++    const alert0 = ctrl.alertProjectSaveError;
++    ctrl.alertProjectSaveError = function () { saveError = true; return alert0 && alert0.apply(this, arguments); };
++    await ctrl.reloadEntry(content);
++    await sleep(800);
++    await ctrl.saveProject();
++    ctrl.alertProjectSaveError = alert0;
++    const after = await updatedOf(target);
++    const saved = !saveError && (before === undefined || after === undefined || after !== before);
++    return { fed: true, saved, reason: saved ? undefined : 'save-failed' };
++  } finally {
++    await removeTemp();
++  }
++})()`;
++}
++
 +export const SHARE_SCRIPT = `(async () => {
 +  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 +  const t0 = Date.now();
@@ -9684,10 +9899,10 @@ index fd44b8ce..841f484e 100644
          }
 diff --git a/src/main/entryAccount.ts b/src/main/entryAccount.ts
 new file mode 100644
-index 00000000..e40da3a9
+index 00000000..8d188c62
 --- /dev/null
 +++ b/src/main/entryAccount.ts
-@@ -0,0 +1,542 @@
+@@ -0,0 +1,612 @@
 +import { lt, setMainLang } from '../common/localLang';
 +import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
 +import path from 'path';
@@ -9709,6 +9924,7 @@ index 00000000..e40da3a9
 +    listProjectsScript,
 +    normalizeEntryUser,
 +    projectIdFromWorkspaceUrl,
++    overwriteScript,
 +} from '../common/entryAccount';
 +
 +/**
@@ -10002,6 +10218,59 @@ index 00000000..e40da3a9
 + * 결과: { projectId, saved, failed }
 + */
 +let saveInProgress: Promise<{ projectId?: string; saved?: boolean; failed?: boolean }> | undefined;
++/** 엔트리 계정 작품(projectId)에 덮어쓰기 — 숨은 창에서 그 작품의 작업 화면을 열고 overwriteScript 실행 */
++async function overwriteOnSite(
++    entBase64: string,
++    projectId: string
++): Promise<{ saved?: boolean; fallback?: boolean; cancelled?: boolean; reason?: string }> {
++    const win = new BrowserWindow({
++        show: false,
++        width: 1280,
++        height: 800,
++        webPreferences: { partition: PARTITION, contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false },
++    });
++    try {
++        return await new Promise((resolve) => {
++            let finished = false;
++            const finish = (r: { saved?: boolean; fallback?: boolean; cancelled?: boolean; reason?: string }) => {
++                if (finished) {
++                    return;
++                }
++                finished = true;
++                clearTimeout(timer);
++                resolve(r);
++            };
++            const timer = setTimeout(() => finish({ reason: 'timeout' }), 120000);
++            cancelCurrentSave = () => finish({ cancelled: true });
++            if (cancelRequested) {
++                finish({ cancelled: true });
++                return;
++            }
++            win.webContents.on('did-navigate', (_e, url) => {
++                if (!isEntryPageAfterLogin(url, BASE)) {
++                    saveUser(undefined); // 엔트리 세션 만료
++                    finish({ reason: 'signed-out' });
++                }
++            });
++            win.webContents.once('did-finish-load', async () => {
++                try {
++                    const r = await win.webContents.executeJavaScript(overwriteScript(entBase64, projectId), true);
++                    logger.info(`엔트리 계정 덮어쓰기: ${JSON.stringify(r)}`);
++                    finish({ saved: !!(r && r.saved), fallback: !!(r && r.fallback), reason: r && r.reason });
++                } catch (e) {
++                    logger.warn(`엔트리 계정 덮어쓰기 실패: ${(e as Error).message}`);
++                    finish({ reason: 'script' });
++                }
++            });
++            win.loadURL(entryWorkspaceUrl(projectId, BASE)).catch(() => finish({ reason: 'load' }));
++        });
++    } finally {
++        if (!win.isDestroyed()) {
++            win.destroy();
++        }
++    }
++}
++
 +/** [entry-local] 진행 중인 계정 저장을 멈춘다 (대기 창의 [취소]) */
 +let cancelCurrentSave: (() => void) | undefined;
 +let cancelRequested = false; // 숨은 창이 준비되기 전에 [취소]를 누른 경우
@@ -10019,6 +10288,22 @@ index 00000000..e40da3a9
 +        await MainUtils.saveProject(project, tmp);
 +        const entBase64 = (await fs.readFile(tmp)).toString('base64');
 +        fs.remove(path.dirname(tmp)).catch(() => undefined);
++
++        // 계정에서 불러온(또는 이미 계정에 저장한) 작품이면 그 작품에 덮어쓴다
++        if (options.entryProjectId && /^[0-9a-f]{24}$/i.test(options.entryProjectId)) {
++            const over = await overwriteOnSite(entBase64, options.entryProjectId);
++            if (over.saved || over.cancelled || !over.fallback) {
++                return over.saved
++                    ? { projectId: options.entryProjectId, saved: true }
++                    : over.cancelled
++                    ? {}
++                    : { failed: true };
++            }
++            // 덮어쓸 수 없는 작품(지워졌거나 남의 작품) → 아래에서 새 작품으로 저장
++        }
++        if (cancelRequested) {
++            return {};
++        }
 +
 +        const win = new BrowserWindow({
 +            show: false,
@@ -10267,10 +10552,10 @@ index 5983999c..ad897155 100644
  const logger = createLogger('main/ipcMainHelper.ts');
 diff --git a/src/main/localProjectStore.ts b/src/main/localProjectStore.ts
 new file mode 100644
-index 00000000..04425a78
+index 00000000..00f51ec9
 --- /dev/null
 +++ b/src/main/localProjectStore.ts
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,230 @@
 +import { lt } from '../common/localLang';
 +import { app, ipcMain, IpcMainInvokeEvent } from 'electron';
 +import path from 'path';
@@ -10470,6 +10755,17 @@ index 00000000..04425a78
 +const store = new LocalProjectStore();
 +
 +ipcMain.handle('localStore:dir', () => store.rootDir);
++// [entry-local] 파일에서 연 작품의 원래 .ent 파일에 덮어쓸 수 있는지 (내부 저장소 파일·없는 파일은 아님)
++ipcMain.handle('localFile:canOverwrite', async (event: IpcMainInvokeEvent, filePath: string) => {
++    if (!filePath || typeof filePath !== 'string' || !path.isAbsolute(filePath) || !/\.ent$/i.test(filePath)) {
++        return false;
++    }
++    const inStore = path.relative(store.rootDir, filePath);
++    if (!inStore.startsWith('..') && !path.isAbsolute(inStore)) {
++        return false;
++    }
++    return fs.pathExists(filePath);
++});
 +ipcMain.handle('localStore:list', () => store.list());
 +ipcMain.handle(
 +    'localStore:save',
@@ -11457,7 +11753,7 @@ index e7ca0a84..6c46c92a 100644
              </header>
          );
 diff --git a/src/renderer/components/workspace.tsx b/src/renderer/components/workspace.tsx
-index 32eb38dd..a473b64f 100644
+index 32eb38dd..868e2769 100644
 --- a/src/renderer/components/workspace.tsx
 +++ b/src/renderer/components/workspace.tsx
 @@ -1,5 +1,5 @@
@@ -11588,7 +11884,7 @@ index 32eb38dd..a473b64f 100644
          setTimeout(async () => {
              await this._waitFontLoad();
              try {
-@@ -108,7 +197,129 @@ class Workspace extends Component<IProps> {
+@@ -108,7 +197,130 @@ class Workspace extends Component<IProps> {
          }, 0);
      }
  
@@ -11698,6 +11994,7 @@ index 32eb38dd..a473b64f 100644
 +                project.entryProjectId = this.entryProjectId;
 +                project.saveTarget = this.saveTarget;
 +                project.parent = this.projectParent;
++                project.savedPath = this.projectSavedPath;
 +                await this.loadProject(project);
 +            }
 +        } catch (e) {
@@ -11718,7 +12015,7 @@ index 32eb38dd..a473b64f 100644
          if (
              prevProps.common.projectName &&
              prevProps.common.projectName !== this.props.common.projectName
-@@ -140,7 +351,7 @@ class Workspace extends Component<IProps> {
+@@ -140,7 +352,7 @@ class Workspace extends Component<IProps> {
          const addEventListener = Entry.addEventListener.bind(Entry);
  
          addEventListener('openBackPack', () => {
@@ -11727,7 +12024,7 @@ index 32eb38dd..a473b64f 100644
          });
          // 교과형에서 하드웨어가 바뀔때 마다 카테고리 변화
          addEventListener('hwChanged', this.handleHardwareChange);
-@@ -162,6 +373,14 @@ class Workspace extends Component<IProps> {
+@@ -162,6 +374,14 @@ class Workspace extends Component<IProps> {
          addEventListener('saveAsWorkspace', () => {
              this.handleSaveAction('saveAs');
          });
@@ -11742,7 +12039,7 @@ index 32eb38dd..a473b64f 100644
          addEventListener('saveCanvasImage', (data: any) => {
              this.handleCanvasImageSave(data);
          });
-@@ -373,6 +592,10 @@ class Workspace extends Component<IProps> {
+@@ -373,6 +593,10 @@ class Workspace extends Component<IProps> {
          const project = Entry.exportProject();
          if (project) {
              project.name = this._getProjectName();
@@ -11753,7 +12050,7 @@ index 32eb38dd..a473b64f 100644
              Object.assign(project, option);
              LocalStorageManager.saveProject(project);
          }
-@@ -438,78 +661,455 @@ class Workspace extends Component<IProps> {
+@@ -438,78 +662,473 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -12037,20 +12334,24 @@ index 32eb38dd..a473b64f 100644
 +                }
 +        }
 +    };
++
++    _exportCurrentProject() {
++        const { persist } = this.props;
++        const { mode } = persist;
  
 -                await IpcRendererHelper.saveProject(project, filePath);
 -                await RendererUtils.clearTempProject({ saveTemp: true });
 -                this.projectSavedPath = filePath;
-+    _exportCurrentProject() {
-+        const { persist } = this.props;
-+        const { mode } = persist;
-+
 +        Entry.stage.handle.setVisible(false);
 +        Entry.stage.update();
 +        const project = Entry.exportProject();
 +        project.isPracticalCourse = mode === 'practical_course';
 +        project.name = this._getProjectName();
 +        project.parent = this.projectParent;
++        // [entry-local] 엔트리 계정 작품 id 를 파일에도 남긴다 → 나중에 다시 열어 계정에 저장해도 같은 작품에 덮어쓴다
++        if (this.entryProjectId) {
++            project.entryProjectId = this.entryProjectId;
++        }
 +        localizeProject(project);
 +        return project;
 +    }
@@ -12065,19 +12366,30 @@ index 32eb38dd..a473b64f 100644
 +                width: 220,
 +            });
 +        }
- 
--                // 모달 해제 후 엔트리 토스트로 저장처리
++
 +        try {
 +            window.addEventListener('beforeunload', this.handleBeforeSaveProject);
 +            this.isSaveProject = true;
 +
 +            const project = this._exportCurrentProject();
++            const isCopy = asNew && !!this.localProjectId;
 +            const meta = await IpcRendererHelper.localStoreSave(project, {
 +                id: asNew ? undefined : this.localProjectId,
-+                name: asNew && this.localProjectId ? lt(`${projectName} 복사본`, `${projectName} copy`) : projectName,
++                name: isCopy ? lt(`${projectName} 복사본`, `${projectName} copy`) : projectName,
 +                thumbnail: makeStageThumbnail(),
 +            });
 +            this.localProjectId = meta.id;
++            // [entry-local] 컴퓨터의 .ent 파일을 열어 작업 중이면 그 파일에도 덮어쓴다 (복사본 저장은 제외)
++            let writtenFile = '';
++            if (!isCopy && this.projectSavedPath) {
++                const canOverwrite = await Promise.resolve(window.ipcInvoke<boolean>('localFile:canOverwrite', this.projectSavedPath)).catch(
++                    () => false
++                );
++                if (canOverwrite) {
++                    await IpcRendererHelper.saveProject(this._exportCurrentProject(), this.projectSavedPath);
++                    writtenFile = this.projectSavedPath;
++                }
++            }
 +            if (!silent) {
 +                this.saveTarget = 'local';
 +            }
@@ -12089,14 +12401,17 @@ index 32eb38dd..a473b64f 100644
 +            // 정식 저장이 끝났으므로 비정상 종료 복구용 임시본은 비운다 (원본 동작과 동일)
 +            this.handleStorageProjectSave.cancel();
 +            LocalStorageManager.clearSavedProject();
-+
+ 
+-                // 모달 해제 후 엔트리 토스트로 저장처리
 +            if (!silent) {
                  this.hideModalProgress();
 -                Entry.stateManager.addStamp();
                  Entry.toast.success(
                      RendererUtils.getLang('Workspace.saved'),
 -                    `${projectName} ${RendererUtils.getLang('Workspace.saved_msg')}`
-+                    `${meta.name} ${RendererUtils.getLang('Workspace.saved_msg')}`
++                    writtenFile
++                        ? lt(`${meta.name} 작품을 원래 파일에 덮어썼습니다.\n${writtenFile}`, `Saved over the original file.\n${writtenFile}`)
++                        : `${meta.name} ${RendererUtils.getLang('Workspace.saved_msg')}`
                  );
 -            } catch (err) {
 -                console.error(err);
@@ -12260,7 +12575,7 @@ index 32eb38dd..a473b64f 100644
      };
  
      handleFileAction = async (type: string) => {
-@@ -518,6 +1118,10 @@ class Workspace extends Component<IProps> {
+@@ -518,6 +1137,10 @@ class Workspace extends Component<IProps> {
                  await RendererUtils.clearTempProject();
                  await this.loadProject();
              }
@@ -12271,7 +12586,7 @@ index 32eb38dd..a473b64f 100644
          } else if (type === 'open_offline') {
              this._loadProjectFromFile(
                  () =>
-@@ -576,11 +1180,33 @@ class Workspace extends Component<IProps> {
+@@ -576,11 +1199,33 @@ class Workspace extends Component<IProps> {
          let projectWorkspaceMode = currentWorkspaceMode;
  
          if (project) {
@@ -12305,7 +12620,7 @@ index 32eb38dd..a473b64f 100644
              delete this.projectSavedPath;
              delete this.projectParent;
              CommonActions.changeProjectName(RendererUtils.getDefaultProjectName());
-@@ -602,8 +1228,14 @@ class Workspace extends Component<IProps> {
+@@ -602,8 +1247,14 @@ class Workspace extends Component<IProps> {
          }
          Entry.reloadBlock();
          this.isFirstRender = false;
@@ -12320,7 +12635,7 @@ index 32eb38dd..a473b64f 100644
          try {
              if (project) {
                  await Entry.loadExternalModules(project);
-@@ -633,9 +1265,38 @@ class Workspace extends Component<IProps> {
+@@ -633,9 +1284,40 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -12342,6 +12657,7 @@ index 32eb38dd..a473b64f 100644
 +        project.entryProjectId = this.entryProjectId;
 +        project.saveTarget = this.saveTarget;
 +        project.parent = this.projectParent;
++        project.savedPath = this.projectSavedPath;
 +        if (key === 'fastEngine') {
 +            setFastEngine(!settings.fastEngine, project);
 +        } else {
@@ -12356,10 +12672,11 @@ index 32eb38dd..a473b64f 100644
 +        project.cloudFileId = this.cloudFileId;
 +        project.entryProjectId = this.entryProjectId;
 +        project.saveTarget = this.saveTarget;
++        project.savedPath = this.projectSavedPath;
          await this.loadProject(project);
      };
  
-@@ -717,6 +1378,8 @@ class Workspace extends Component<IProps> {
+@@ -717,6 +1399,8 @@ class Workspace extends Component<IProps> {
                          onFileAction={this.handleFileAction}
                          onReloadProject={this.reloadProject}
                          onLoadProject={this.loadProject}
@@ -15342,10 +15659,10 @@ index 00000000..211f9e78
 +}
 diff --git a/src/web/entryAccountWeb.ts b/src/web/entryAccountWeb.ts
 new file mode 100644
-index 00000000..eebe1843
+index 00000000..5ee41852
 --- /dev/null
 +++ b/src/web/entryAccountWeb.ts
-@@ -0,0 +1,220 @@
+@@ -0,0 +1,228 @@
 +import { lt } from '../common/localLang';
 +import { registerPlugin } from '@capacitor/core';
 +import {
@@ -15361,6 +15678,7 @@ index 00000000..eebe1843
 +    isAllowedExternalUrl,
 +    listProjectsScript,
 +    normalizeEntryUser,
++    overwriteScript,
 +} from '../common/entryAccount';
 +import { isNative } from './platform';
 +import { emit } from './bus';
@@ -15384,6 +15702,8 @@ index 00000000..eebe1843
 +        help: string;
 +        projectId?: string;
 +        importScript?: string;
++        overwriteScript?: string;
++        newUrl?: string;
 +        texts?: { [key: string]: string };
 +    }): Promise<{ projectId?: string; saved?: boolean; failed?: boolean }>;
 +    share(options: { url: string; script: string }): Promise<{ shared?: boolean }>;
@@ -15530,13 +15850,18 @@ index 00000000..eebe1843
 +    for (let i = 0; i < bytes.length; i += 0x8000) {
 +        bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
 +    }
++    const b64 = btoa(bin);
++    // 계정에서 불러온(또는 이미 계정에 저장한) 작품이면 먼저 그 작품에 덮어쓰기를 시도한다
++    const target = options.entryProjectId && /^[0-9a-f]{24}$/i.test(options.entryProjectId) ? options.entryProjectId : '';
 +    const res = await EntryAccount.openWorkspace({
-+        url: entryWorkspaceUrl(), // 오프라인 작품 불러오기는 계정에 새 작품을 만든다
-+        ent: btoa(bin),
++        url: target ? entryWorkspaceUrl(target) : entryWorkspaceUrl(),
++        newUrl: entryWorkspaceUrl(), // 덮어쓸 수 없으면: 오프라인 작품 불러오기로 계정에 새 작품을 만든다
++        ent: b64,
 +        fileName: 'entry-local-project.ent', // 영문 이름 (작품 이름은 .ent 안에 들어 있음)
 +        help: savingText(),
-+        projectId: options.entryProjectId,
-+        importScript: autoImportScript(btoa(bin)),
++        projectId: target || undefined,
++        overwriteScript: target ? overwriteScript(b64, target) : '',
++        importScript: autoImportScript(b64),
 +        texts: saveTexts(),
 +    });
 +    return {
