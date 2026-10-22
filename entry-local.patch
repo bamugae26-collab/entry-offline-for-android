@@ -11500,7 +11500,7 @@ index 32eb38dd..97c297a8 100644
 +    private saveTarget: 'local' | 'drive' | 'entry' = 'local';
 +    private entryProjectId?: string; // [entry-local] 엔트리 계정 작품 id
 +    // [entry-local] 첫 화면을 그리기 전에 앱 설정의 언어를 알려 둔다 (lt() 문구가 처음부터 맞는 언어로 나오게)
-+    private langInit = (() => {
++    langInit = (() => {
 +        const persisted = (this.props as any).persist;
 +        if (persisted && persisted.lang) {
 +            setMainLang(persisted.lang);
