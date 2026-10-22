@@ -465,10 +465,10 @@ index 00000000..28d6785c
 +</manifest>
 diff --git a/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
 new file mode 100644
-index 00000000..e5c4d523
+index 00000000..374dde71
 --- /dev/null
 +++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
-@@ -0,0 +1,833 @@
+@@ -0,0 +1,954 @@
 +package biz.softline.entrylocal;
 +
 +import android.app.Dialog;
@@ -529,15 +529,32 @@ index 00000000..e5c4d523
 +public class EntryAccountPlugin extends Plugin {
 +
 +    private static final String ORIGIN = "https://playentry.org";
++    // 사용자 정보 읽기 (Promise) — src/common/entryAccount.ts 의 USER_SCRIPT 와 같은 내용
 +    private static final String USER_SCRIPT =
-+        "(() => { try {" +
-+        " const el = document.getElementById('__NEXT_DATA__'); if (!el) return null;" +
-+        " const d = JSON.parse(el.textContent || '{}'); const p = d && d.props || {};" +
-+        " const pick = (s) => s && s.common && s.common.user;" +
-+        " const u = pick(p.initialState) || pick(p.pageProps && p.pageProps.initialState);" +
-+        " const id = u && (u.id || u._id); if (!id) return null;" +
-+        " return { id: String(id), username: String(u.username || ''), nickname: String(u.nickname || u.username || '') };" +
-+        " } catch (e) { return null; } })()";
++        "(async () => { " +
++        "  const pick = (d) => { " +
++        "    try { " +
++        "      const p = (d && d.props) || {}; " +
++        "      const s = (x) => x && x.common && x.common.user; " +
++        "      const u = s(p.pageProps && p.pageProps.initialState) || s(p.initialState); " +
++        "      const id = u && (u.id || u._id); " +
++        "      if (!id) return null; " +
++        "      // 웹판과 같은 기준: 이메일 인증 + 학생 계정 아님 → 저장 완료 창에 [작품 공유하기] " +
++        "      return { id: String(id), username: String(u.username || ''), nickname: String(u.nickname || u.username || ''), canShare: !!(u.isEmailAuth && u.role !== 'student') }; " +
++        "    } catch (e) { return null; } " +
++        "  }; " +
++        "  try { " +
++        "    const el = document.getElementById('__NEXT_DATA__'); " +
++        "    const d = el ? JSON.parse(el.textContent || '{}') : null; " +
++        "    if (d && d.page !== '/signin') { const u = pick(d); if (u) return u; } " +
++        "  } catch (e) {} " +
++        "  try { " +
++        "    const res = await fetch('/', { credentials: 'include', cache: 'no-store' }); " +
++        "    const html = await res.text(); " +
++        "    const m = /<script id=\"__NEXT_DATA__\"[^>]*>([\\s\\S]*?)<\\/script>/.exec(html); " +
++        "    return m ? pick(JSON.parse(m[1])) : null; " +
++        "  } catch (e) { return null; } " +
++        "})()";
 +
 +    /**
 +     * 로그인 화면에서 엔트리·네이버 커넥트 머리말(로고, 생각하기/만들기/… 메뉴, 검색, 로그인 버튼)과
@@ -573,6 +590,28 @@ index 00000000..e5c4d523
 +
 +    private Dialog loginDialog;
 +    private final Handler main = new Handler(Looper.getMainLooper());
++
++    /** 비동기 사용자 읽기 결과를 받는 다리 (로그인·확인용 웹뷰에 붙임) */
++    private final java.util.Map<String, ValueCallback<String>> pendingUser = new java.util.concurrent.ConcurrentHashMap<>();
++    private final Object userBridge = new Object() {
++        @JavascriptInterface
++        public void done(String token, String json) {
++            final ValueCallback<String> cb = pendingUser.remove(token);
++            if (cb != null) main.post(() -> cb.onReceiveValue(json == null ? "null" : json));
++        }
++    };
++
++    /** USER_SCRIPT 를 실행해 결과(JSON 글 또는 "null")를 돌려준다. 웹뷰에 EntryLocalUser 다리가 붙어 있어야 한다. */
++    private void readUser(WebView web, ValueCallback<String> cb) {
++        final String token = UUID.randomUUID().toString();
++        pendingUser.put(token, cb);
++        web.evaluateJavascript(
++            "Promise.resolve().then(() => " + USER_SCRIPT + ")" +
++            ".then((u) => EntryLocalUser.done('" + token + "', JSON.stringify(u === undefined ? null : u)))" +
++            ".catch(() => EntryLocalUser.done('" + token + "', 'null'));",
++            null
++        );
++    }
 +
 +    private static boolean isEntryHost(Uri uri) {
 +        String host = uri.getHost();
@@ -680,6 +719,7 @@ index 00000000..e5c4d523
 +
 +            final WebView web = new WebView(getContext());
 +            configure(web);
++            web.addJavascriptInterface(userBridge, "EntryLocalUser"); // 사용자 정보 읽기 결과
 +            // 로그인 직후 엔트리 첫 화면 대신 보여 줄 덮개
 +            FrameLayout holder = new FrameLayout(getContext());
 +            holder.addView(web, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -730,8 +770,8 @@ index 00000000..e5c4d523
 +            };
 +            poll[0] = () -> {
 +                if (finished[0]) return;
-+                web.evaluateJavascript(USER_SCRIPT, onUser);
-+                main.postDelayed(poll[0], 400);
++                readUser(web, onUser);
++                main.postDelayed(poll[0], 1200);
 +            };
 +
 +            // 엔트리가 로그인 후 페이지를 새로 열지 않고 화면만 바꾸는 경우(주소만 바뀜) 처리.
@@ -739,7 +779,7 @@ index 00000000..e5c4d523
 +            // (Windows판의 did-navigate-in-page 처리와 같다)
 +            final Runnable settle = () -> {
 +                if (finished[0] || web.getProgress() < 100) return; // 새로 열리는 중이면 onPageFinished 가 처리
-+                web.evaluateJavascript(USER_SCRIPT, (value) -> {
++                readUser(web, (value) -> {
 +                    if (finished[0]) return;
 +                    if (parseUser(value) != null) {
 +                        onUser.onReceiveValue(value);
@@ -774,7 +814,7 @@ index 00000000..e5c4d523
 +                    if (!finished[0] && isAfterLogin(url)) {
 +                        cover.setVisibility(View.VISIBLE);
 +                        main.removeCallbacks(poll[0]);
-+                        main.postDelayed(poll[0], 400);
++                        main.postDelayed(poll[0], 1200);
 +                    }
 +                }
 +
@@ -819,7 +859,7 @@ index 00000000..e5c4d523
 +                        veil.setVisibility(View.GONE);
 +                    }
 +                    if (finished[0] || !isAfterLogin(url)) return;
-+                    view.evaluateJavascript(USER_SCRIPT, (value) -> {
++                    readUser(view, (value) -> {
 +                        if (finished[0]) return;
 +                        if (parseUser(value) != null) {
 +                            onUser.onReceiveValue(value);
@@ -880,6 +920,7 @@ index 00000000..e5c4d523
 +            final boolean[] finished = { false };
 +            final WebView web = new WebView(getContext());
 +            configure(web);
++            web.addJavascriptInterface(userBridge, "EntryLocalUser"); // 사용자 정보 읽기 결과
 +            final Runnable timeout = () -> {
 +                if (finished[0]) return;
 +                finished[0] = true;
@@ -893,7 +934,7 @@ index 00000000..e5c4d523
 +                public void onPageFinished(WebView view, String url) {
 +                    if (finished[0]) return;
 +                    if (!isEntryHost(Uri.parse(url))) return;
-+                    view.evaluateJavascript(USER_SCRIPT, (value) -> {
++                    readUser(view, (value) -> {
 +                        if (finished[0]) return;
 +                        finished[0] = true;
 +                        main.removeCallbacks(timeout);
@@ -1026,8 +1067,8 @@ index 00000000..e5c4d523
 +    }
 +
 +    /**
-+     * 반자동 저장: 엔트리 작업 화면을 전체 화면 창에 열고, 사이트의 파일 선택(오프라인 작품 불러오기)에
-+     * 지금 작품(.ent)을 자동으로 넣어 준다. 창을 닫으면 { projectId } (저장되어 /ws/<id> 주소가 생겼으면).
++     * 엔트리 계정에 저장 (자동): 엔트리 작업 화면을 가린 채 열고, 사이트의 [오프라인 작품 불러오기]에 지금 작품을 넣는다.
++     * 결과 { projectId, saved, failed }.
 +     */
 +    @PluginMethod
 +    public void openWorkspace(final PluginCall call) {
@@ -1035,9 +1076,8 @@ index 00000000..e5c4d523
 +        final String base64 = call.getString("ent", "");
 +        final String fileName = call.getString("fileName", "project.ent").replaceAll("[\\\\/:*?\"<>|]", "_");
 +        final String help = call.getString("help", "");
-+        // 자동 진행 (없으면 안내만)
-+        final String probeMenu = call.getString("probeMenu", "");
-+        final String probePlain = call.getString("probe", "");
++        // 자동 진행 스크립트 (작품 파일 내용 포함)
++        final String importScript = call.getString("importScript", "");
 +        final JSObject texts = call.getObject("texts", new JSObject());
 +        Uri target = Uri.parse(url);
 +        if (!"https".equals(target.getScheme()) || !isEntryHost(target)) {
@@ -1108,109 +1148,52 @@ index 00000000..e5c4d523
 +                }
 +                return keyCode == KeyEvent.KEYCODE_BACK;
 +            });
-+            // ---- 자동 진행: 불러오기 메뉴 누르기 → 다 불러오면 Ctrl+S → 저장되면 창 닫기 ----
++            // ---- 자동 진행 (실제 엔트리 구조 기준) ----
++            // 작업 화면이 열리면 importScript 가 [file] → [오프라인 작품 불러오기]에 작품 파일을 직접 넣는다.
++            // 엔트리는 그 파일로 계정에 새 작품을 만들고 /ws/<새 id> 로 이동한다 → 저장 완료로 보고 창을 닫는다.
 +            final boolean[] closed = { false };
 +            final boolean[] saved = { false };
 +            final boolean[] autoStarted = { false };
-+            final String[] phase = { "import" };
-+            final long[] phaseAt = { SystemClock.uptimeMillis() };
-+            final boolean[] triedSaveClick = { false };
 +            final boolean[] failed = { false };
++            final java.util.regex.Pattern WS_ID = java.util.regex.Pattern.compile("/ws/([0-9a-fA-F]{24})");
++            final String[] startId = { null };
 +            final Runnable fail = () -> {
-+                // 자동으로 못 끝냄: 창을 닫고 실패로 돌려준다 (앱에서 다시 시도 안내)
++                if (closed[0] || saved[0]) return;
 +                failed[0] = true;
 +                dialog.dismiss();
 +            };
-+            final Runnable[] tick = new Runnable[1];
-+            final java.util.function.BiConsumer<String, String> go = (next, key) -> {
-+                phase[0] = next;
-+                phaseAt[0] = SystemClock.uptimeMillis();
-+                String t = texts.getString(key);
++            main.postDelayed(fail, 90000);
++            final java.util.function.Consumer<String> onUrl = (visited) -> {
++                if (closed[0] || saved[0] || visited == null) return;
++                Uri u = Uri.parse(visited);
++                String path = u.getPath() == null ? "" : u.getPath();
++                if (isEntryHost(u) && path.startsWith("/signin")) {
++                    fail.run(); // 엔트리 세션 만료
++                    return;
++                }
++                java.util.regex.Matcher m = WS_ID.matcher(visited);
++                if (!autoStarted[0] || !m.find()) return;
++                String id = m.group(1);
++                if (id.equals(startId[0])) return;
++                projectId[0] = id;
++                saved[0] = true;
++                String t = texts.getString("done");
 +                if (t != null && !t.isEmpty()) text.setText(t);
++                main.removeCallbacks(fail);
++                main.postDelayed(dialog::dismiss, 500);
 +            };
-+            final java.util.function.BiConsumer<JSONObject, Double> tap = (p, dpr) -> {
-+                float x = (float) (p.optDouble("x") * dpr);
-+                float y = (float) (p.optDouble("y") * dpr);
-+                long t0 = SystemClock.uptimeMillis();
-+                MotionEvent down = MotionEvent.obtain(t0, t0, MotionEvent.ACTION_DOWN, x, y, 0);
-+                MotionEvent up = MotionEvent.obtain(t0, t0 + 60, MotionEvent.ACTION_UP, x, y, 0);
-+                web.dispatchTouchEvent(down);
-+                web.dispatchTouchEvent(up);
-+                down.recycle();
-+                up.recycle();
-+            };
-+            final Runnable ctrlS = () -> {
-+                web.requestFocus();
-+                long t0 = SystemClock.uptimeMillis();
-+                int meta = KeyEvent.META_CTRL_ON | KeyEvent.META_CTRL_LEFT_ON;
-+                web.dispatchKeyEvent(new KeyEvent(t0, t0, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_S, 0, meta));
-+                web.dispatchKeyEvent(new KeyEvent(t0, t0 + 50, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_S, 0, meta));
-+            };
-+            tick[0] = () -> {
-+                if (closed[0] || probePlain.isEmpty()) return;
-+                String script = "import".equals(phase[0]) ? probeMenu : probePlain;
-+                web.evaluateJavascript(script, (value) -> {
-+                    if (closed[0]) return;
-+                    JSONObject st = null;
-+                    try {
-+                        Object parsed = new JSONTokener(value).nextValue();
-+                        if (parsed instanceof JSONObject) st = (JSONObject) parsed;
-+                    } catch (Exception ignored) {
-+                        // 다음에 다시
-+                    }
-+                    if (st != null) {
-+                        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^/ws/([0-9a-fA-F]{24})").matcher(st.optString("path", ""));
-+                        if (m.find()) projectId[0] = m.group(1);
-+                        double dpr = st.optDouble("dpr", 1);
-+                        long waited = SystemClock.uptimeMillis() - phaseAt[0];
-+                        boolean loaded = st.optBoolean("loaded");
-+                        if (st.optBoolean("saved")) {
-+                            saved[0] = true;
-+                            go.accept("done", "done");
-+                            main.postDelayed(dialog::dismiss, 500);
-+                            return;
++            web.addJavascriptInterface(new Object() {
++                @JavascriptInterface
++                public void done(String json) {
++                    main.post(() -> {
++                        try {
++                            if (!new JSONObject(json).optBoolean("fed")) fail.run(); // 불러오기 메뉴를 못 찾음
++                        } catch (Exception ignored) {
++                            // 페이지가 이동하며 끊긴 경우 등: 이동 감지로 판단
 +                        }
-+                        switch (phase[0]) {
-+                            case "import": {
-+                                JSONObject at = st.optJSONObject("importAt");
-+                                if (loaded) {
-+                                    go.accept("loading", "importing");
-+                                } else if (at != null) {
-+                                    tap.accept(at, dpr);
-+                                    go.accept("loading", "importing");
-+                                } else if (waited > (st.optBoolean("ready") ? 12000 : 40000)) {
-+                                    fail.run();
-+                                    return;
-+                                }
-+                                break;
-+                            }
-+                            case "loading":
-+                                if (loaded) {
-+                                    main.postDelayed(ctrlS, 800);
-+                                    go.accept("saving", "saving");
-+                                } else if (waited > 30000) {
-+                                    fail.run();
-+                                    return;
-+                                }
-+                                break;
-+                            case "saving": {
-+                                JSONObject at = st.optJSONObject("saveAt");
-+                                if (waited > 6000 && !triedSaveClick[0] && at != null) {
-+                                    triedSaveClick[0] = true;
-+                                    tap.accept(at, dpr);
-+                                } else if (waited > 45000) {
-+                                    fail.run();
-+                                    return;
-+                                }
-+                                break;
-+                            }
-+                            default:
-+                                break;
-+                        }
-+                    }
-+                    main.postDelayed(tick[0], 700);
-+                });
-+            };
++                    });
++                }
++            }, "EntryLocalSave");
 +            final WebViewClient base = new WebViewClient() {
 +                @Override
 +                public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -1219,26 +1202,36 @@ index 00000000..e5c4d523
 +                }
 +
 +                @Override
++                public void onPageStarted(WebView view, String started, android.graphics.Bitmap favicon) {
++                    onUrl.accept(started);
++                }
++
++                @Override
 +                public void doUpdateVisitedHistory(WebView view, String visited, boolean isReload) {
-+                    java.util.regex.Matcher m = java.util.regex.Pattern.compile("/ws/([0-9a-fA-F]{24})").matcher(visited == null ? "" : visited);
-+                    if (m.find()) projectId[0] = m.group(1);
++                    onUrl.accept(visited);
 +                }
 +
 +                @Override
 +                public void onPageFinished(WebView view, String loaded) {
-+                    if (!autoStarted[0] && !probePlain.isEmpty()) {
-+                        autoStarted[0] = true;
-+                        String t = texts.getString("start");
-+                        if (t != null && !t.isEmpty()) text.setText(t);
-+                        main.postDelayed(tick[0], 700);
-+                    }
++                    if (autoStarted[0] || importScript.isEmpty() || closed[0]) return;
++                    autoStarted[0] = true;
++                    java.util.regex.Matcher m = WS_ID.matcher(loaded == null ? "" : loaded);
++                    startId[0] = m.find() ? m.group(1) : null;
++                    String t = texts.getString("start");
++                    if (t != null && !t.isEmpty()) text.setText(t);
++                    view.evaluateJavascript(
++                        "Promise.resolve().then(() => " + importScript + ")" +
++                        ".then((r) => EntryLocalSave.done(JSON.stringify(r || {})))" +
++                        ".catch(() => EntryLocalSave.done('{\"fed\":false}'));",
++                        null
++                    );
 +                }
 +            };
 +            web.setWebViewClient(base);
 +
 +            dialog.setOnDismissListener((d) -> {
 +                closed[0] = true;
-+                main.removeCallbacks(tick[0]);
++                main.removeCallbacks(fail);
 +                web.stopLoading();
 +                web.destroy();
 +                file.delete();
@@ -1247,6 +1240,134 @@ index 00000000..e5c4d523
 +                r.put("projectId", projectId[0]);
 +                r.put("saved", saved[0]);
 +                r.put("failed", failed[0] && !saved[0]);
++                call.resolve(r);
++            });
++            dialog.setContentView(root);
++            Window w = dialog.getWindow();
++            if (w != null) {
++                w.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
++                w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
++            }
++            dialog.show();
++            web.loadUrl(url);
++        });
++    }
++
++    /**
++     * [작품 공유하기] — 웹판 저장 완료 창의 버튼과 같은 동작.
++     * 작품의 엔트리 작업 화면을 전체 화면 창에 열고 script(SHARE_SCRIPT)로 엔트리의 '작품 공유하기' 패널을 띄운다.
++     * 공유를 마치면(엔트리가 작업 화면을 떠남) 또는 취소하면 창을 닫는다. 결과 { shared }
++     */
++    @PluginMethod
++    public void share(final PluginCall call) {
++        final String url = call.getString("url", "");
++        final String script = call.getString("script", "");
++        Uri target = Uri.parse(url);
++        if (!"https".equals(target.getScheme()) || !isEntryHost(target)) {
++            call.reject("엔트리 주소가 아닙니다.");
++            return;
++        }
++        main.post(() -> {
++            final boolean[] shared = { false };
++            final boolean[] closed = { false };
++            final boolean[] started = { false };
++            Dialog dialog = new Dialog(getActivity(), android.R.style.Theme_Material_Light_NoActionBar);
++            dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
++            LinearLayout root = new LinearLayout(getContext());
++            root.setOrientation(LinearLayout.VERTICAL);
++            root.setBackgroundColor(Color.WHITE);
++            LinearLayout bar = new LinearLayout(getContext());
++            bar.setOrientation(LinearLayout.HORIZONTAL);
++            bar.setGravity(Gravity.CENTER_VERTICAL);
++            bar.setPadding(dp(16), dp(6), dp(8), dp(6));
++            bar.setBackgroundColor(Color.parseColor("#4F80FF"));
++            TextView title = new TextView(getContext());
++            title.setText("작품 공유하기");
++            title.setTextColor(Color.WHITE);
++            title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
++            bar.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
++            Button close = new Button(getContext(), null, android.R.attr.borderlessButtonStyle);
++            close.setText("닫기");
++            close.setTextColor(Color.WHITE);
++            bar.addView(close);
++            root.addView(bar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
++            final WebView web = new WebView(getContext());
++            configure(web);
++            web.getSettings().setUserAgentString(web.getSettings().getUserAgentString().replace("; wv", ""));
++            root.addView(web, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
++
++            final Runnable[] poll = new Runnable[1];
++            final Runnable finishShared = () -> {
++                if (closed[0]) return;
++                shared[0] = true;
++                main.removeCallbacks(poll[0]);
++                main.postDelayed(dialog::dismiss, 1500);
++            };
++            poll[0] = () -> {
++                if (closed[0]) return;
++                web.evaluateJavascript("window.__elShare || ''", (value) -> {
++                    if (closed[0]) return;
++                    if (value != null && value.contains("cancel")) {
++                        dialog.dismiss();
++                    } else if (value != null && value.contains("shared")) {
++                        finishShared.run();
++                    } else {
++                        main.postDelayed(poll[0], 600);
++                    }
++                });
++            };
++            final java.util.function.Consumer<String> onUrl = (visited) -> {
++                if (closed[0] || !started[0] || visited == null) return;
++                Uri u = Uri.parse(visited);
++                String path = u.getPath() == null ? "" : u.getPath();
++                if (!isEntryHost(u)) return;
++                if (path.startsWith("/signin")) {
++                    dialog.dismiss(); // 엔트리 세션 만료
++                } else if (!path.startsWith("/ws/")) {
++                    finishShared.run(); // 공유를 마치고 작업 화면을 떠남
++                }
++            };
++            web.setWebViewClient(new WebViewClient() {
++                @Override
++                public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
++                    String scheme = request.getUrl().getScheme();
++                    return !("http".equals(scheme) || "https".equals(scheme));
++                }
++
++                @Override
++                public void onPageStarted(WebView view, String startedUrl, android.graphics.Bitmap favicon) {
++                    onUrl.accept(startedUrl);
++                }
++
++                @Override
++                public void doUpdateVisitedHistory(WebView view, String visited, boolean isReload) {
++                    onUrl.accept(visited);
++                }
++
++                @Override
++                public void onPageFinished(WebView view, String loaded) {
++                    if (started[0] || closed[0] || script.isEmpty()) return;
++                    started[0] = true;
++                    view.evaluateJavascript(script, null);
++                    main.postDelayed(poll[0], 1500);
++                }
++            });
++            close.setOnClickListener((v) -> dialog.dismiss());
++            dialog.setOnKeyListener((d, keyCode, event) -> {
++                if (keyCode == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_UP) {
++                    dialog.dismiss();
++                    return true;
++                }
++                return keyCode == KeyEvent.KEYCODE_BACK;
++            });
++            dialog.setOnDismissListener((d) -> {
++                closed[0] = true;
++                main.removeCallbacks(poll[0]);
++                web.stopLoading();
++                web.destroy();
++                CookieManager.getInstance().flush();
++                JSObject r = new JSObject();
++                r.put("shared", shared[0]);
 +                call.resolve(r);
 +            });
 +            dialog.setContentView(root);
@@ -4891,7 +5012,7 @@ index 00000000..23d15a93
 +exec "$JAVACMD" "$@"
 diff --git a/mobile/android/gradlew.bat b/mobile/android/gradlew.bat
 new file mode 100644
-index 00000000..5eed7ee8
+index 00000000..db3a6ac2
 --- /dev/null
 +++ b/mobile/android/gradlew.bat
 @@ -0,0 +1,94 @@
@@ -7814,10 +7935,10 @@ index dc07af56..8c75ef68 100644
          "dist:mac": "cross-env NODE_ENV=production NODE_OPTIONS=--openssl-legacy-provider webpack && cross-env NOTARIZE=false electron-builder -c --mac",
 diff --git a/scripts/mock-entry.js b/scripts/mock-entry.js
 new file mode 100644
-index 00000000..7aa00810
+index 00000000..7fe0ec66
 --- /dev/null
 +++ b/scripts/mock-entry.js
-@@ -0,0 +1,187 @@
+@@ -0,0 +1,227 @@
 +#!/usr/bin/env node
 +/**
 + * [entry-local] 시험용 가짜 엔트리(playentry.org) 서버
@@ -7842,32 +7963,42 @@ index 00000000..7aa00810
 +    { id: '6500000000000000000000a2', name: '비공개 연습', thumb: null, created: '2026-10-02T01:00:00.000Z', updated: '2026-10-17T10:00:00.000Z', isopen: false },
 +];
 +const PNG_1PX = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
-+const wsPage = (id) => `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>작업</title><meta name="csrf-token" content="mock-csrf">
-+<style>body{font-family:sans-serif;margin:0} header{height:60px;background:#4f80ff;display:flex;align-items:center;gap:10px;padding:0 16px;color:#fff}
-+.dd{position:absolute;top:56px;left:16px;background:#fff;color:#222;border:1px solid #ccc;display:none} .dd.open{display:block} .dd div{padding:10px 18px;cursor:pointer}
-+main{padding:30px}</style></head>
-+<body><header><span class="btn_workspace_file" title="파일" style="display:inline-block;width:40px;height:30px;background:#fff3;border-radius:8px"></span><span>엔트리 만들기 ${id || 'new'}</span></header>
-+<div class="dd" id="dd"><div id="mnew">새로 만들기</div><div id="mimport">${process.env.MOCK_IMPORT_LABEL || "오프라인 작품 불러오기"}</div><div>내 컴퓨터에 저장하기</div></div>
-+<input type="file" id="file" accept=".ent" style="display:none">
-+<main><p id="status">불러온 작품 없음</p><button id="save">저장하기</button></main>
++// 실제 엔트리 작업 화면 구조 (2026-10-22 확인): 아이콘 버튼 글자 file/save/help, 메뉴는 약 1초 뒤 표시,
++// 늘 있는 input[type=file][accept=.ent], 오프라인 작품 불러오기 = 계정에 새 작품 생성 후 /ws/<새 id> 로 이동
++const wsPage = (id) => `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>작품 만들기 : 엔트리</title><meta name="csrf-token" content="mock-csrf">
++<style>body{font-family:sans-serif;margin:0} header{height:48px;background:#4f80ff;display:flex;align-items:center;gap:10px;padding:0 16px;color:#fff}
++button.icon{width:48px;height:32px;border:0;border-radius:16px;background:#fff3;color:transparent;font-size:1px}
++.dd{position:absolute;top:44px;left:300px;background:#fff;color:#222;border:1px solid #ccc} .dd div{padding:10px 18px;cursor:pointer}</style></head>
++<body><header><span>엔트리 ${id || 'new'}</span><div style="margin-left:280px;display:flex;gap:10px"><button class="icon" id="bfile"><span>file</span></button><button class="icon" id="bsave"><span>save</span></button><button class="icon"><span>help</span></button></div></header>
++<input type="file" accept=".ent" class="css-1hyfx7x" style="display:none">
++<main style="padding:30px"><p id="status">작업 화면</p></main>
 +<script>
 +let current = { name: ${JSON.stringify(id ? '계정 작품 하나' : '새 작품')}, objects: [{ id: 'o1' }] };
 +setTimeout(() => { window.Entry = { container: {}, playground: {}, engine: {}, exportProject: () => current, loadProject: (p) => { current = p; } }; }, 1200);
-+document.querySelector('.btn_workspace_file').onclick = () => document.getElementById('dd').classList.toggle('open');
-+document.getElementById('mimport').onclick = () => { document.getElementById('dd').classList.remove('open'); document.getElementById('file').click(); };
-+document.getElementById('file').onchange = async (e) => {
-+  const f = e.target.files[0]; const b = new Uint8Array(await f.arrayBuffer());
-+  document.getElementById('status').textContent = f.name + ' ' + f.size;
-+  await fetch('/_mock/uploaded', { method: 'POST', body: JSON.stringify({ name: f.name, size: f.size, gzip: b[0] === 0x1f && b[1] === 0x8b }) });
-+  setTimeout(() => window.Entry.loadProject({ name: '불러온 작품', objects: [{ id: 'x' }] }), 500);
++const input = document.querySelector('input[type=file]');
++let dd = null;
++const menu = (items) => { if (dd) { dd.remove(); dd = null; return; } setTimeout(() => { dd = document.createElement('div'); dd.className = 'dd';
++  items.forEach(([t, fn]) => { const d = document.createElement('div'); d.className = 'item__p5HkM'; d.textContent = t; d.onclick = () => { dd.remove(); dd = null; fn(); }; dd.appendChild(d); }); document.body.appendChild(dd); }, 900); };
++document.getElementById('bfile').onclick = () => menu([['새로 만들기', () => {}], ['작품 불러오기', () => {}], ['${process.env.MOCK_IMPORT_LABEL || '오프라인 작품 불러오기'}', () => input.click()]]);
++document.getElementById('bsave').onclick = () => menu([['저장하기', () => {}], ['복사본으로 저장하기', () => {}], ['내 컴퓨터에 저장하기', () => {}]]);
++// 실제 엔트리처럼: 작업 공간 관리자가 React 컨텍스트 값으로 있고 openShareProject(id) 가 '작품 공유하기' 패널을 연다
++const ctrl = {
++  openShareProject(pid) {
++    const p = document.createElement('div'); p.id = 'sharePanel';
++    p.innerHTML = '<h2>작품 공유하기</h2><p>제목 ' + pid + '</p><button id="shCancel">취소</button><button id="shOk">공유하기</button>';
++    document.body.appendChild(p);
++    document.getElementById('shCancel').onclick = () => { p.remove(); this.hideShareProject(); };
++    document.getElementById('shOk').onclick = async () => { await fetch('/_mock/shared', { method: 'POST' }); location.href = '/discovery/project/' + pid; };
++  },
++  hideShareProject(e) {},
 +};
-+const save = async () => {
-+  const r = await fetch('/graphql/SAVE_PROJECT', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-+  if (r.ok && location.pathname === '/ws/new') history.pushState({}, '', '/ws/6500000000000000000000b9');
-+  document.getElementById('status').textContent += ' / 저장됨';
-+};
-+document.getElementById('save').onclick = save;
-+document.addEventListener('keydown', (e) => { if (e.ctrlKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); save(); } });
++document.getElementById('__next') || (() => { const n = document.createElement('div'); n.id = '__next'; document.body.appendChild(n); })();
++document.getElementById('__next')['__reactContainer$mock'] = { stateNode: { current: { memoizedProps: {}, child: { memoizedProps: { value: ctrl }, child: null, sibling: null }, sibling: null } } };
++input.addEventListener('change', async () => {
++  const f = input.files[0]; if (!f) return; const b = new Uint8Array(await f.arrayBuffer());
++  const r = await fetch('/_mock/import', { method: 'POST', body: JSON.stringify({ name: f.name, size: f.size, gzip: b[0] === 0x1f && b[1] === 0x8b }) });
++  const j = await r.json(); if (j.id) location.href = '/ws/' + j.id + '?type=normal&mode=block&lang=ko';
++});
 +</script></body></html>`;
 +
 +const page = (title, body, nextData) => `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${title}</title>
@@ -7901,6 +8032,32 @@ index 00000000..7aa00810
 +            }
 +            res.writeHead(200, { 'Content-Type': 'application/json' });
 +            res.end('{"ok":true}');
++        });
++        return;
++    }
++    if (url.pathname === '/_mock/shared' && req.method === 'POST') {
++        counters.shared = (counters.shared || 0) + 1;
++        res.writeHead(200, { 'Content-Type': 'application/json' });
++        return res.end('{}');
++    }
++    if (url.pathname.startsWith('/discovery/')) {
++        return send(200, page('공유됨', '<h1>공유한 작품</h1>', { page: '/discovery', props: {} }));
++    }
++    if (url.pathname === '/_mock/import' && req.method === 'POST') {
++        let body = '';
++        req.on('data', (c) => (body += c));
++        req.on('end', () => {
++            if (!sessionOf(req)) {
++                res.writeHead(401, { 'Content-Type': 'application/json' });
++                return res.end('{}');
++            }
++            const info = JSON.parse(body || '{}');
++            uploads.push(info);
++            counters.saves++;
++            const id = crypto.randomBytes(12).toString('hex');
++            PROJECTS.unshift({ id, name: '불러온 작품', thumb: null, created: new Date().toISOString(), updated: new Date().toISOString(), isopen: false });
++            res.writeHead(200, { 'Content-Type': 'application/json' });
++            res.end(JSON.stringify({ id }));
 +        });
 +        return;
 +    }
@@ -7971,7 +8128,10 @@ index 00000000..7aa00810
 +                const sid = crypto.randomBytes(8).toString('hex');
 +                sessions.add(sid);
 +                counters.logins++;
-+                send(302, '', { Location: '/', 'Set-Cookie': `mock_session=${sid}; Path=/; HttpOnly; Max-Age=2592000` });
++                // 실제 엔트리처럼: 페이지를 새로 열지 않고 주소만 / 로 바꾼다 (페이지 데이터는 로그인 화면 것 그대로)
++                send(200, page('엔트리', '<h1>엔트리 홈 (화면만 바뀜)</h1><script>history.replaceState(null, "", "/")</script>', { page: '/signin', props: { pageProps: { isSigned: false, initialState: { common: { user: null } } } } }), {
++                    'Set-Cookie': `mock_session=${sid}; Path=/; HttpOnly; Max-Age=2592000`,
++                });
 +            } else {
 +                send(200, page('로그인', '<p id="err">아이디 또는 비밀번호가 틀렸습니다.</p><a href="/signin">다시</a>', { props: { initialState: { common: { user: null } } } }));
 +            }
@@ -8001,7 +8161,8 @@ index 00000000..7aa00810
 +    return send(
 +        200,
 +        page('엔트리', `<h1>엔트리 홈</h1><p>${logged ? '로그인됨' : '로그인 안 됨'}</p>`, {
-+            props: { initialState: { common: { user: logged ? { ...USER, _id: USER.id } : null } } },
++            page: '/',
++            props: { pageProps: { isSigned: logged, initialState: { common: { user: logged ? { ...USER, _id: USER.id, xToken: 'mock-xtoken', isEmailAuth: true, role: 'member' } : null } } } },
 +        })
 +    );
 +}).listen(port, '127.0.0.1', () => console.log(`mock entry on ${port}`));
@@ -8398,7 +8559,7 @@ index 00000000..86986717
 +}
 diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
 new file mode 100644
-index 00000000..681f1462
+index 00000000..b517dfd9
 --- /dev/null
 +++ b/src/common/buildInfo.ts
 @@ -0,0 +1,5 @@
@@ -8406,7 +8567,7 @@ index 00000000..681f1462
 + * [entry-local] 패치 버전 — 내 작품 창 아래에 표시된다.
 + * 태블릿·PC 에 설치된 앱이 최신 패치로 빌드된 것인지 확인하는 용도. 패치를 낼 때마다 올린다.
 + */
-+export const ENTRY_LOCAL_BUILD = '2026.10.20-b (엔트리 계정 작품·자동 저장)';
++export const ENTRY_LOCAL_BUILD = '2026.10.22-e (계정 이름 간격)';
 diff --git a/src/common/driveClient.ts b/src/common/driveClient.ts
 new file mode 100644
 index 00000000..2e0a75fe
@@ -8748,10 +8909,10 @@ index 00000000..2e0a75fe
 +}
 diff --git a/src/common/entryAccount.ts b/src/common/entryAccount.ts
 new file mode 100644
-index 00000000..f0a049f7
+index 00000000..8d68d317
 --- /dev/null
 +++ b/src/common/entryAccount.ts
-@@ -0,0 +1,256 @@
+@@ -0,0 +1,296 @@
 +/**
 + * [entry-local] 엔트리(playentry.org) 계정 — Windows·안드로이드 공통 상수
 + *
@@ -8763,7 +8924,7 @@ index 00000000..f0a049f7
 + * 엔트리 사이트 구조가 바뀌면 USER_SCRIPT 만 고치면 된다.
 + */
 +
-+export type EntryUser = { id: string; username: string; nickname: string };
++export type EntryUser = { id: string; username: string; nickname: string; canShare?: boolean };
 +export type EntryStatus = { loggedIn: boolean; user?: EntryUser };
 +
 +export const ENTRY_ORIGIN = 'https://playentry.org';
@@ -8772,21 +8933,35 @@ index 00000000..f0a049f7
 +
 +export const entryProfileUrl = (user: EntryUser) => `${ENTRY_ORIGIN}/profile/${encodeURIComponent(user.id)}`;
 +
-+/** 엔트리 페이지 안에서 실행: 로그인한 사용자 { id, username, nickname } 또는 null (객체를 그대로 반환) */
-+export const USER_SCRIPT = `(() => {
++/**
++ * 엔트리 페이지 안에서 실행: 로그인한 사용자 { id, username, nickname } 또는 null (Promise)
++ * 엔트리는 로그인 후 주소만 바꾸고 페이지 데이터(__NEXT_DATA__)는 로그인 화면 것 그대로 두므로,
++ * 지금 페이지 데이터가 로그인 화면 것이면 첫 화면(/)을 직접 받아 그 안의 사용자 정보를 읽는다.
++ * (실제 사이트 확인: props.pageProps.initialState.common.user = { id, username, nickname, xToken, … })
++ */
++export const USER_SCRIPT = `(async () => {
++  const pick = (d) => {
++    try {
++      const p = (d && d.props) || {};
++      const s = (x) => x && x.common && x.common.user;
++      const u = s(p.pageProps && p.pageProps.initialState) || s(p.initialState);
++      const id = u && (u.id || u._id);
++      if (!id) return null;
++      // 웹판과 같은 기준: 이메일 인증 + 학생 계정 아님 → 저장 완료 창에 [작품 공유하기]
++      return { id: String(id), username: String(u.username || ''), nickname: String(u.nickname || u.username || ''), canShare: !!(u.isEmailAuth && u.role !== 'student') };
++    } catch (e) { return null; }
++  };
 +  try {
 +    const el = document.getElementById('__NEXT_DATA__');
-+    if (!el) return null;
-+    const d = JSON.parse(el.textContent || '{}');
-+    const p = d && d.props || {};
-+    const pick = (s) => s && s.common && s.common.user;
-+    const u = pick(p.initialState) || pick(p.pageProps && p.pageProps.initialState);
-+    const id = u && (u.id || u._id);
-+    if (!id) return null;
-+    return { id: String(id), username: String(u.username || ''), nickname: String(u.nickname || u.username || '') };
-+  } catch (e) {
-+    return null;
-+  }
++    const d = el ? JSON.parse(el.textContent || '{}') : null;
++    if (d && d.page !== '/signin') { const u = pick(d); if (u) return u; }
++  } catch (e) {}
++  try {
++    const res = await fetch('/', { credentials: 'include', cache: 'no-store' });
++    const html = await res.text();
++    const m = /<script id="__NEXT_DATA__"[^>]*>([\\s\\S]*?)<\\/script>/.exec(html);
++    return m ? pick(JSON.parse(m[1])) : null;
++  } catch (e) { return null; }
 +})()`;
 +
 +/** 로그인 페이지가 아닌 엔트리 페이지인가 (로그인 완료 후 이동한 곳) */
@@ -8809,6 +8984,7 @@ index 00000000..f0a049f7
 +        id: String(value.id),
 +        username: String(value.username || ''),
 +        nickname: String(value.nickname || value.username || ''),
++        canShare: value.canShare === undefined ? true : !!value.canShare,
 +    };
 +}
 +
@@ -8856,7 +9032,14 @@ index 00000000..f0a049f7
 +  const h = { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Client-Type': 'Client' };
 +  const meta = document.querySelector('meta[name="csrf-token"]');
 +  if (meta && meta.content) h['CSRF-Token'] = meta.content;
-+  try { const x = localStorage.getItem('playentry_token'); if (x) h['x-token'] = x; } catch (e) {}
++  try {
++    const d = JSON.parse((document.getElementById('__NEXT_DATA__') || {}).textContent || '{}');
++    const p = (d && d.props) || {};
++    const s = (x) => x && x.common && x.common.user;
++    const u = s(p.pageProps && p.pageProps.initialState) || s(p.initialState);
++    const x = (u && u.xToken) || localStorage.getItem('playentry_token');
++    if (x) h['x-token'] = x;
++  } catch (e) {}
 +  return h;
 +}`;
 +
@@ -8923,91 +9106,109 @@ index 00000000..f0a049f7
 +})()`;
 +}
 +
-+/** 반자동 저장 창 안내 문구 */
-+export const SAVE_VIA_SITE_HELP =
-+    '① 엔트리 화면 왼쪽 위 [파일] 메뉴 → [오프라인 작품 불러오기]를 누르세요. 지금 작품 파일이 자동으로 선택됩니다.  ② 작품이 열리면 [저장하기]를 누르세요.  ③ 저장이 끝나면 이 창을 닫으세요.';
-+
 +/* ------------------------------------------------------------------ */
-+/* 계정 저장 자동 진행 — 엔트리 작업 화면 안에서 상태를 살피는 스크립트    */
-+/* 앱(Windows·안드로이드)이 0.7초마다 실행해 결과를 보고 진짜 클릭·키 입력을 보낸다. */
++/* 계정 저장 (완전 자동) — 실제 엔트리 작업 화면 구조 기준 (2026-10-22 확인)  */
++/*  - 상단 아이콘 버튼 글자: file / save / help (아이콘 이름)                  */
++/*  - file 메뉴: 새로 만들기 · 작품 불러오기 · 오프라인 작품 불러오기 (약 1초 뒤 표시) */
++/*  - 오프라인 작품 불러오기 = .ent 를 올려 계정에 새 작품을 만들고 /ws/<새 id> 로 이동 */
++/* 파일 선택 창을 띄우지 않고 파일을 직접 넣는다 (input.click 을 가로채 DataTransfer). */
 +/* ------------------------------------------------------------------ */
 +
-+export type AutoSaveProbe = {
-+    ready: boolean; // 엔트리 편집기 준비됨
-+    loaded: boolean; // '오프라인 작품 불러오기'로 작품을 다 불러옴
-+    saved: boolean; // 저장 요청이 성공함 (또는 새 작품 주소가 생김)
-+    path: string;
-+    importAt?: { x: number; y: number } | null; // [오프라인 작품 불러오기] 위치 (CSS px)
-+    saveAt?: { x: number; y: number } | null; // [저장하기] 위치
-+    dpr: number;
-+};
++export const ENTRY_IMPORT_LABEL = '오프라인 작품 불러오기';
 +
-+export const AUTO_IMPORT_LABELS = ['오프라인 작품 불러오기', '오프라인 작품 열기', '내 컴퓨터에서 불러오기', '파일 불러오기'];
-+
-+/** openMenu: 불러오기 항목이 안 보이면 [파일] 메뉴로 보이는 것을 하나씩 눌러 본다 */
-+export function autoSaveProbeScript(openMenu: boolean) {
-+    return `(() => {
-+  const w = window;
-+  if (!w.__el) {
-+    w.__el = { loaded: false, saved: false, startPath: location.pathname, ti: 0 };
-+    const SAVE_RE = /\\/graphql\\/[A-Z_]*(SAVE|CREATE|UPDATE|INSERT)[A-Z_]*PROJECT|\\/graphql\\/[A-Z_]*PROJECT[A-Z_]*(SAVE|CREATE|UPDATE|INSERT)/i;
-+    const mark = (url, status) => { if (status >= 200 && status < 300 && SAVE_RE.test(String(url))) w.__el.saved = true; };
-+    const f0 = w.fetch;
-+    w.fetch = function (input, init) {
-+      const url = typeof input === 'string' ? input : (input && input.url) || '';
-+      const method = (init && init.method) || (input && input.method) || 'GET';
-+      const p = f0.apply(this, arguments);
-+      if (String(method).toUpperCase() === 'POST') p.then((r) => mark(url, r.status)).catch(() => {});
-+      return p;
-+    };
-+    const o0 = XMLHttpRequest.prototype.open, s0 = XMLHttpRequest.prototype.send;
-+    XMLHttpRequest.prototype.open = function (m, u) { this.__elM = m; this.__elU = u; return o0.apply(this, arguments); };
-+    XMLHttpRequest.prototype.send = function () {
-+      if (String(this.__elM).toUpperCase() === 'POST') this.addEventListener('load', () => mark(this.__elU, this.status));
-+      return s0.apply(this, arguments);
-+    };
++/** 작업 화면에서 실행: 작품(.ent, base64)을 '오프라인 작품 불러오기'로 넣는다 → { fed, how } (Promise) */
++export function autoImportScript(entBase64: string) {
++    return `(async () => {
++  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
++  const started = Date.now();
++  while (Date.now() - started < 60000) {
++    const E = window.Entry;
++    if (E && E.container && E.playground && E.engine && typeof E.exportProject === 'function') break;
++    await sleep(400);
 +  }
-+  const E = w.Entry;
-+  if (E && typeof E.loadProject === 'function' && !E.loadProject.__elWrapped) {
-+    const orig = E.loadProject;
-+    const wrapped = function () { const r = orig.apply(this, arguments); setTimeout(() => { w.__el.loaded = true; }, 1500); return r; };
-+    wrapped.__elWrapped = true;
-+    E.loadProject = wrapped;
-+  }
-+  const ready = !!(E && E.container && E.playground && E.engine && typeof E.exportProject === 'function');
-+  const vis = (e) => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
-+  const all = () => [...document.querySelectorAll('body *')].filter((e) => !e.closest('#entry-local-save-help'));
-+  const byText = (texts) => {
-+    const list = all();
-+    for (const t of texts) {
-+      const el = list.find((e) => (e.textContent || '').trim() === t && ![...e.children].some((c) => (c.textContent || '').trim() === t) && vis(e));
-+      if (el) return el;
++  await sleep(1500); // 편집기가 준비된 직후에는 메뉴 버튼이 아직 반응하지 않기도 한다
++  const bin = atob(${JSON.stringify(entBase64)});
++  const bytes = new Uint8Array(bin.length);
++  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
++  const file = new File([bytes], 'entry-local-project.ent', { type: 'application/octet-stream' });
++  const st = (window.__elImport = { fed: false, how: '' });
++  const c0 = HTMLInputElement.prototype.click;
++  HTMLInputElement.prototype.click = function () {
++    if (this.type === 'file' && !st.fed && /\\.ent/.test(this.accept || '.ent')) {
++      st.fed = true;
++      const dt = new DataTransfer();
++      dt.items.add(file);
++      this.files = dt.files;
++      this.dispatchEvent(new Event('change', { bubbles: true }));
++      return;
 +    }
-+    return null;
++    return c0.apply(this, arguments);
 +  };
-+  const at = (el) => { if (!el) return null; const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; };
-+  const IMPORT = ${JSON.stringify(AUTO_IMPORT_LABELS)};
-+  let importEl = byText(IMPORT);
-+  if (!importEl && ready && ${openMenu ? 'true' : 'false'}) {
-+    const triggers = all().filter((e) => vis(e) && e.getBoundingClientRect().top < 140 && (
-+      (e.textContent || '').trim() === '파일' || /파일/.test(e.getAttribute('title') || '') || /파일/.test(e.getAttribute('aria-label') || '') ||
-+      (typeof e.className === 'string' && /(^|[^a-z])file/i.test(e.className) && /button|^a$|^div$|^span$/i.test(e.tagName))));
-+    if (triggers.length) { const t = triggers[w.__el.ti++ % Math.min(triggers.length, 6)]; try { t.click(); } catch (e) {} }
++  const vis = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
++  const item = () => [...document.querySelectorAll('body *')].find((e) => !e.children.length && (e.textContent || '').trim() === ${JSON.stringify(ENTRY_IMPORT_LABEL)} && vis(e));
++  const fileBtn = () => [...document.querySelectorAll('button')].find((b) => /^(file|파일)$/.test((b.textContent || '').trim()) && vis(b));
++  for (let tries = 0; tries < 6 && !st.fed; tries++) {
++    let it = item();
++    if (!it) {
++      const b = fileBtn();
++      if (b) b.click();
++      // 실제 사이트는 페이지가 열린 직후 메뉴가 3초 넘게 걸리기도 한다 → 다시 누르면 닫히므로 6초까지 기다린다
++      for (let i = 0; i < 24 && !(it = item()); i++) await sleep(250);
++    }
++    if (it) { st.how = 'menu'; it.click(); await sleep(800); }
++    else await sleep(500);
 +  }
-+  const newSaved = /^\\/ws\\/new/.test(w.__el.startPath) && /^\\/ws\\/[0-9a-f]{24}/i.test(location.pathname);
-+  return { ready, loaded: !!w.__el.loaded, saved: !!w.__el.saved || newSaved, path: location.pathname, importAt: at(importEl), saveAt: at(byText(['저장하기'])), dpr: w.devicePixelRatio || 1 };
++  if (!st.fed) {
++    // 메뉴를 못 찾음: 작업 화면에 늘 있는 .ent 입력칸으로 직접
++    const input = document.querySelector('input[type=file][accept*=".ent"]');
++    if (input) { st.how = 'input'; input.click(); }
++  }
++  return { fed: st.fed, how: st.how };
 +})()`;
 +}
 +
-+/** 자동 진행 단계별 안내 문구 */
-+export const AUTO_SAVE_TEXT = {
-+    start: '자동으로 저장하는 중입니다… (1/3 엔트리 화면 여는 중) 화면을 누르지 말고 잠시 기다려 주세요.',
-+    importing: '자동으로 저장하는 중입니다… (2/3 작품 불러오는 중)',
-+    saving: '자동으로 저장하는 중입니다… (3/3 엔트리에 저장하는 중)',
-+    done: '엔트리 계정에 저장했습니다. 창을 닫습니다.',
-+    manualImport: '자동 불러오기를 못 했습니다. [파일] 메뉴 → [오프라인 작품 불러오기]를 눌러 주세요 (작품 파일은 자동으로 들어갑니다). 그 뒤 [저장하기]를 누르면 창이 자동으로 닫힙니다.',
-+    manualSave: '작품을 불러왔습니다. 엔트리의 [저장하기]를 눌러 주세요. 저장되면 창이 자동으로 닫힙니다.',
-+};
++
++/* ------------------------------------------------------------------ */
++/* [작품 공유하기] — 웹판 저장 완료 창의 버튼과 같은 동작                    */
++/* 작업 화면(/ws/<id>)의 작업 공간 관리자(React 컨텍스트 값)의 openShareProject(id) 를 불러  */
++/* 엔트리 자체의 '작품 공유하기' 패널(제목·카테고리·미리보기·공유하기)을 연다.            */
++/* window.__elShare: 'open' → 'cancel'(취소·닫기) / 공유가 끝나면 엔트리가 다른 페이지로 이동 */
++/* ------------------------------------------------------------------ */
++export const SHARE_SCRIPT = `(async () => {
++  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
++  const t0 = Date.now();
++  while (Date.now() - t0 < 60000) {
++    const E = window.Entry;
++    if (E && E.container && E.playground && E.engine) break;
++    await sleep(400);
++  }
++  await sleep(1200);
++  document.querySelectorAll('.tooltipGuide .close').forEach((c) => { try { c.click(); } catch (e) {} }); // 첫 방문 안내 닫기
++  const root = document.getElementById('__next');
++  const key = root && Object.keys(root).find((k) => k.startsWith('__reactContainer'));
++  let start = key && root[key];
++  if (start && start.stateNode && start.stateNode.current) start = start.stateNode.current;
++  let ctrl = null;
++  const stack = [start];
++  for (let n = 0; stack.length && n < 50000 && !ctrl; n++) {
++    const f = stack.pop();
++    if (!f) continue;
++    const v = f.memoizedProps && f.memoizedProps.value;
++    if (v && typeof v === 'object' && typeof v.openShareProject === 'function') ctrl = v;
++    if (f.child) stack.push(f.child);
++    if (f.sibling) stack.push(f.sibling);
++  }
++  if (!ctrl) return { opened: false };
++  const id = location.pathname.split('/')[2];
++  const hide0 = ctrl.hideShareProject;
++  ctrl.hideShareProject = function (e) {
++    window.__elShare = e && e.href ? 'shared' : 'cancel';
++    return hide0.apply(this, arguments);
++  };
++  window.__elShare = 'open';
++  ctrl.openShareProject(id);
++  return { opened: true };
++})()`;
 diff --git a/src/main/cloudDrive.ts b/src/main/cloudDrive.ts
 new file mode 100644
 index 00000000..9673de3c
@@ -9425,7 +9626,7 @@ index fd44b8ce..841f484e 100644
          }
 diff --git a/src/main/entryAccount.ts b/src/main/entryAccount.ts
 new file mode 100644
-index 00000000..9de72edb
+index 00000000..06b2a274
 --- /dev/null
 +++ b/src/main/entryAccount.ts
 @@ -0,0 +1,522 @@
@@ -9438,10 +9639,9 @@ index 00000000..9de72edb
 +    ENTRY_ORIGIN,
 +    EntryStatus,
 +    EntryUser,
-+    AUTO_SAVE_TEXT,
-+    AutoSaveProbe,
++    SHARE_SCRIPT,
 +    USER_SCRIPT,
-+    autoSaveProbeScript,
++    autoImportScript,
 +    entryProfileUrl,
 +    entryWorkspaceUrl,
 +    exportProjectScript,
@@ -9737,186 +9937,186 @@ index 00000000..9de72edb
 +}
 +
 +/**
-+ * 반자동 저장: 엔트리 작업 화면을 앱 안 창에 열고, 사이트의 '오프라인 작품 불러오기' 파일 선택에
-+ * 지금 작품(.ent)을 자동으로 넣어 준다. 사용자가 엔트리의 [저장하기]를 누르면 계정에 저장된다.
-+ * 창을 닫으면 { projectId } (저장되어 작품 주소가 생겼으면).
++ * 엔트리 계정에 저장 (완전 자동, 화면에 보이지 않음)
++ * 보이지 않는 창에 엔트리 새 작업 화면(/ws/new)을 열고, 사이트의 [file] → [오프라인 작품 불러오기]에
++ * 지금 작품(.ent)을 직접 넣는다. 엔트리는 그 파일로 계정에 새 작품을 만들고 /ws/<새 id> 로 이동한다 → 완료.
++ * 결과: { projectId, saved, failed }
 + */
-+let saveInProgress: Promise<{ projectId?: string; saved?: boolean }> | undefined;
++let saveInProgress: Promise<{ projectId?: string; saved?: boolean; failed?: boolean }> | undefined;
 +function saveViaSite(project: any, options: { entryProjectId?: string; name: string }) {
 +    requireUser();
 +    if (saveInProgress) {
 +        return saveInProgress;
 +    }
 +    saveInProgress = (async () => {
-+        // 파일 이름은 영문으로: 한글 경로는 파일 자동 입력이 조용히 실패한다 (작품 이름은 .ent 안에 들어 있음)
 +        const tmp = path.join(tmpDir(), `${Date.now()}`, 'entry-local-project.ent');
 +        await fs.ensureDir(path.dirname(tmp));
++        project.name = options.name || project.name;
 +        await MainUtils.saveProject(project, tmp);
++        const entBase64 = (await fs.readFile(tmp)).toString('base64');
++        fs.remove(path.dirname(tmp)).catch(() => undefined);
++
++        const win = new BrowserWindow({
++            show: false,
++            width: 1280,
++            height: 800,
++            webPreferences: {
++                partition: PARTITION,
++                contextIsolation: true,
++                nodeIntegration: false,
++                sandbox: true,
++                backgroundThrottling: false,
++            },
++        });
 +        try {
-+            return await new Promise<{ projectId?: string; saved?: boolean }>((resolve, reject) => {
-+                const parent = mainWindow();
-+                const win = new BrowserWindow({
-+                    parent,
-+                    modal: !!parent,
-+                    width: 1280,
-+                    height: 820,
-+                    title: '엔트리 계정에 저장',
-+                    autoHideMenuBar: true,
-+                    backgroundColor: '#ffffff',
-+                    webPreferences: { partition: PARTITION, contextIsolation: true, nodeIntegration: false, sandbox: true },
-+                });
-+                win.setMenuBarVisibility(false);
-+                let projectId = options.entryProjectId;
-+                let saved = false;
-+                const track = (url: string) => {
-+                    projectId = projectIdFromWorkspaceUrl(url) || projectId;
-+                };
-+                let bannerText = AUTO_SAVE_TEXT.start;
-+                const banner = (text = bannerText) => {
-+                    bannerText = text;
-+                    win.setTitle(`엔트리 계정에 저장 — ${text}`);
-+                    const code = `(() => {
-+                        let d = document.getElementById('entry-local-save-help');
-+                        if (!d) {
-+                            d = document.createElement('div');
-+                            d.id = 'entry-local-save-help';
-+                            d.style.cssText = 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:2147483647;max-width:min(900px,92vw);padding:10px 16px;border-radius:10px;background:rgba(32,40,60,.92);color:#fff;font:14px/1.6 sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.3);pointer-events:none';
-+                            document.body.appendChild(d);
-+                        }
-+                        d.textContent = ${JSON.stringify(text)};
-+                    })()`;
-+                    if (!win.isDestroyed()) {
-+                        win.webContents.executeJavaScript(code).catch(() => undefined);
-+                    }
-+                };
-+                const dbg = win.webContents.debugger;
-+                const intercept = async () => {
-+                    try {
-+                        if (!dbg.isAttached()) {
-+                            dbg.attach('1.3');
-+                        }
-+                        await dbg.sendCommand('Page.enable');
-+                        await dbg.sendCommand('Page.setInterceptFileChooserDialog', { enabled: true });
-+                    } catch (e) {
-+                        logger.warn(`파일 선택 자동 입력 준비 실패: ${(e as Error).message}`);
-+                    }
-+                };
-+                dbg.on('message', (_event, method, params) => {
-+                    if (method === 'Page.fileChooserOpened' && params && params.backendNodeId) {
-+                        dbg.sendCommand('DOM.setFileInputFiles', { files: [tmp], backendNodeId: params.backendNodeId }).catch((e) =>
-+                            logger.warn(`파일 자동 입력 실패: ${e.message}`)
-+                        );
-+                    }
-+                });
-+                win.webContents.on('did-navigate', (_e, url) => track(url));
-+                win.webContents.on('did-navigate-in-page', (_e, url) => track(url));
-+                // ---- 자동 진행: 불러오기 메뉴 누르기 → 다 불러오면 Ctrl+S → 저장되면 창 닫기 ----
-+                let autoStarted = false;
-+                const autoRun = async () => {
-+                    if (autoStarted) {
++            return await new Promise<{ projectId?: string; saved?: boolean; failed?: boolean }>((resolve) => {
++                let startId: string | undefined;
++                let started = false;
++                let finished = false;
++                const finish = (r: { projectId?: string; saved?: boolean; failed?: boolean }) => {
++                    if (finished) {
 +                        return;
 +                    }
-+                    autoStarted = true;
-+                    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-+                    const probe = async (openMenu: boolean): Promise<AutoSaveProbe | undefined> => {
-+                        if (win.isDestroyed()) {
-+                            return undefined;
-+                        }
-+                        try {
-+                            return await win.webContents.executeJavaScript(autoSaveProbeScript(openMenu));
-+                        } catch (e) {
-+                            return undefined;
-+                        }
-+                    };
-+                    const click = (p: { x: number; y: number }) => {
-+                        win.webContents.sendInputEvent({ type: 'mouseDown', x: p.x, y: p.y, button: 'left', clickCount: 1 });
-+                        win.webContents.sendInputEvent({ type: 'mouseUp', x: p.x, y: p.y, button: 'left', clickCount: 1 });
-+                    };
-+                    const ctrlS = () => {
-+                        win.webContents.focus();
-+                        win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 's', modifiers: ['control'] });
-+                        win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 's', modifiers: ['control'] });
-+                    };
-+                    let phase: 'import' | 'loading' | 'saving' | 'manual' = 'import';
-+                    let phaseAt = Date.now();
-+                    let triedSaveClick = false;
-+                    const go = (next: typeof phase, text: string) => {
-+                        phase = next;
-+                        phaseAt = Date.now();
-+                        banner(text);
-+                    };
-+                    while (!win.isDestroyed()) {
-+                        await sleep(700);
-+                        const st = await probe(phase === 'import');
-+                        if (!st) {
-+                            continue;
-+                        }
-+                        track(`${BASE}${st.path}`);
-+                        if (st.saved) {
-+                            saved = true;
-+                            banner(AUTO_SAVE_TEXT.done);
-+                            await sleep(1500);
-+                            if (!win.isDestroyed()) {
-+                                win.close();
-+                            }
-+                            return;
-+                        }
-+                        const waited = Date.now() - phaseAt;
-+                        if (phase === 'import') {
-+                            if (st.loaded) {
-+                                go('loading', AUTO_SAVE_TEXT.importing);
-+                            } else if (st.importAt) {
-+                                click(st.importAt);
-+                                go('loading', AUTO_SAVE_TEXT.importing);
-+                            } else if (waited > (st.ready ? 12000 : 40000)) {
-+                                go('manual', AUTO_SAVE_TEXT.manualImport);
-+                            }
-+                        } else if (phase === 'loading' || phase === 'manual') {
-+                            if (st.loaded) {
-+                                await sleep(800);
-+                                ctrlS();
-+                                go('saving', AUTO_SAVE_TEXT.saving);
-+                            } else if (phase === 'loading' && waited > 30000) {
-+                                go('manual', AUTO_SAVE_TEXT.manualImport);
-+                            }
-+                        } else if (phase === 'saving') {
-+                            if (waited > 6000 && !triedSaveClick && st.saveAt) {
-+                                triedSaveClick = true;
-+                                click(st.saveAt);
-+                            } else if (waited > 15000) {
-+                                banner(AUTO_SAVE_TEXT.manualSave);
-+                                phaseAt = Date.now() + 3600000; // 더 이상 바꾸지 않음 (저장되면 위에서 닫힘)
-+                            }
-+                        }
++                    finished = true;
++                    clearTimeout(timer);
++                    resolve(r);
++                };
++                const timer = setTimeout(() => finish({ failed: true }), 90000);
++                const onUrl = (url: string) => {
++                    if (!isEntryPageAfterLogin(url, BASE)) {
++                        // 로그인 화면으로 돌려보내짐 = 엔트리 세션 만료
++                        saveUser(undefined);
++                        finish({ failed: true });
++                        return;
++                    }
++                    const id = projectIdFromWorkspaceUrl(url);
++                    if (started && id && id !== startId) {
++                        // 엔트리가 새 작품을 만들고 그 작업 화면으로 이동함 = 저장 완료
++                        finish({ projectId: id, saved: true });
 +                    }
 +                };
-+                win.webContents.on('did-finish-load', () => {
-+                    intercept();
-+                    banner();
-+                    autoRun();
-+                });
-+                win.on('closed', () => {
-+                    if (parent && !parent.isDestroyed()) {
-+                        parent.focus();
++                win.webContents.on('did-navigate', (_e, url) => onUrl(url));
++                win.webContents.on('did-navigate-in-page', (_e, url) => onUrl(url));
++                win.webContents.once('did-finish-load', async () => {
++                    startId = projectIdFromWorkspaceUrl(win.webContents.getURL());
++                    started = true;
++                    try {
++                        const r = await win.webContents.executeJavaScript(autoImportScript(entBase64), true);
++                        if (!r || !r.fed) {
++                            logger.warn('엔트리 오프라인 작품 불러오기를 찾지 못함');
++                            finish({ failed: true });
++                        }
++                    } catch (e) {
++                        // 불러오기 직후 페이지가 이동하면 스크립트가 끊긴다 (정상) — 이동으로 완료를 판단
 +                    }
-+                    resolve({ projectId, saved });
 +                });
-+                // 디버거 명령은 첫 페이지가 열린 뒤에 보내야 한다 (그 전에 보내면 응답이 오지 않음) → did-finish-load 에서
-+                win.loadURL(entryWorkspaceUrl(options.entryProjectId, BASE)).catch((e) => {
-+                    logger.warn(`엔트리 작업 화면 열기 실패: ${e.message}`);
-+                    if (!win.isDestroyed()) {
-+                        win.destroy();
-+                    }
-+                    reject(new Error('엔트리 작업 화면을 열 수 없습니다. 인터넷 연결을 확인해 주세요.'));
-+                });
++                win.loadURL(entryWorkspaceUrl(undefined, BASE)).catch(() => finish({ failed: true }));
 +            });
 +        } finally {
-+            fs.remove(path.dirname(tmp)).catch(() => undefined);
++            if (!win.isDestroyed()) {
++                win.destroy();
++            }
 +        }
 +    })().finally(() => {
 +        saveInProgress = undefined;
 +    });
 +    return saveInProgress;
++}
++
++/**
++ * [작품 공유하기] — 웹판 저장 완료 창의 버튼과 같은 동작.
++ * 작품의 엔트리 작업 화면을 앱 안 창에 열고 엔트리 자체의 '작품 공유하기' 패널을 띄운다.
++ * 사용자가 공유를 마치거나(엔트리가 다른 페이지로 이동) 취소하면 창을 닫는다. 결과 { shared }
++ */
++let shareInProgress: Promise<{ shared: boolean }> | undefined;
++function shareProject(projectId: string) {
++    requireUser();
++    if (shareInProgress) {
++        return shareInProgress;
++    }
++    shareInProgress = new Promise<{ shared: boolean }>((resolve, reject) => {
++        const parent = mainWindow();
++        const win = new BrowserWindow({
++            parent,
++            modal: !!parent,
++            width: 1280,
++            height: 820,
++            title: '작품 공유하기',
++            autoHideMenuBar: true,
++            backgroundColor: '#ffffff',
++            webPreferences: { partition: PARTITION, contextIsolation: true, nodeIntegration: false, sandbox: true },
++        });
++        win.setMenuBarVisibility(false);
++        let shared = false;
++        let poll: ReturnType<typeof setInterval> | undefined;
++        const done = () => {
++            if (poll) {
++                clearInterval(poll);
++                poll = undefined;
++            }
++            if (!win.isDestroyed()) {
++                win.close();
++            }
++        };
++        win.on('closed', () => {
++            if (poll) {
++                clearInterval(poll);
++            }
++            if (parent && !parent.isDestroyed()) {
++                parent.focus();
++            }
++            resolve({ shared });
++        });
++        const onUrl = (url: string) => {
++            // 공유를 마치면 엔트리가 작업 화면을 떠난다 (공유한 작품 페이지 등)
++            try {
++                const p = new URL(url).pathname;
++                if (p.startsWith('/signin')) {
++                    saveUser(undefined); // 엔트리 세션 만료
++                    done();
++                } else if (!p.startsWith('/ws/')) {
++                    shared = true;
++                    setTimeout(done, 1500);
++                }
++            } catch (e) {
++                // 무시
++            }
++        };
++        win.webContents.on('did-navigate', (_e, url) => onUrl(url));
++        win.webContents.on('did-navigate-in-page', (_e, url) => onUrl(url));
++        win.webContents.once('did-finish-load', async () => {
++            try {
++                const r = await win.webContents.executeJavaScript(SHARE_SCRIPT, true);
++                if (!r || !r.opened) {
++                    logger.warn('엔트리 작품 공유하기 패널을 열지 못함');
++                    return; // 창은 그대로 둔다 (사용자가 엔트리 화면에서 직접 할 수 있게)
++                }
++            } catch (e) {
++                return;
++            }
++            poll = setInterval(async () => {
++                if (win.isDestroyed()) {
++                    return;
++                }
++                const state = await win.webContents.executeJavaScript('window.__elShare || ""').catch(() => '');
++                if (state === 'cancel') {
++                    done();
++                } else if (state === 'shared') {
++                    shared = true;
++                    setTimeout(done, 1500);
++                }
++            }, 600);
++        });
++        win.loadURL(entryWorkspaceUrl(projectId, BASE)).catch(() => {
++            if (!win.isDestroyed()) {
++                win.destroy();
++            }
++            reject(new Error('엔트리 작업 화면을 열 수 없습니다. 인터넷 연결을 확인해 주세요.'));
++        });
++    }).finally(() => {
++        shareInProgress = undefined;
++    });
++    return shareInProgress;
 +}
 +
 +const wrap = (fn: (...args: any[]) => any) => async (event: any, ...args: any[]) => {
@@ -9934,6 +10134,7 @@ index 00000000..9de72edb
 +ipcMain.handle('entry:projects', wrap((start, display) => listProjects(start, display)));
 +ipcMain.handle('entry:load', wrap((projectId, name) => loadProject(projectId, name)));
 +ipcMain.handle('entry:saveViaSite', wrap((project, options) => saveViaSite(project, options)));
++ipcMain.handle('entry:share', wrap((projectId) => shareProject(projectId)));
 +ipcMain.handle('entry:base', wrap(() => BASE));
 +ipcMain.handle(
 +    'entry:profileUrl',
@@ -10485,10 +10686,10 @@ index 12e1e85b..9ce14ba8 100644
          },
          {
 diff --git a/src/renderer/components/header.scss b/src/renderer/components/header.scss
-index 0fa6192c..df5277c3 100644
+index 0fa6192c..c4aa15ad 100644
 --- a/src/renderer/components/header.scss
 +++ b/src/renderer/components/header.scss
-@@ -366,3 +366,83 @@
+@@ -366,3 +366,181 @@
  [role='button'] {
      cursor: pointer;
  }
@@ -10506,9 +10707,11 @@ index 0fa6192c..df5277c3 100644
 +/* 성능 메뉴(엔진 최적화·부스트·터보)는 기본형 구역 안으로 옮겨 놓는다 (header.tsx arrangeToolbar) */
 +/* 구분선: 회원가입 ↔ 한국어 사이에 선을 긋고, 한국어 ↔ 톱니바퀴 사이의 선은 없앤다 */
 +.group_inner.account_group {
-+    padding-right: 14px !important;
-+    margin-right: -6px !important;
-+    background: linear-gradient(#fff, #fff) no-repeat right center / 1px 16px;
++    padding-right: 12px !important;
++}
++/* 계정 이름 ▾ ↔ 구분선 간격 = 기본형 ▾ ↔ 성능 간격(12px) */
++.common_gnb .group_box .group_inner.account_group .link_workspace_text.account_name {
++    margin-right: 0;
 +}
 +.group_inner.gear_group,
 +.group_inner.gear_group:before,
@@ -10538,7 +10741,7 @@ index 0fa6192c..df5277c3 100644
 +    vertical-align: top;
 +    width: auto !important;
 +    min-width: 0 !important;
-+    margin-left: 0 !important;
++    margin-left: 12px !important;
 +    padding-left: 0 !important;
 +}
 +/* 출력 버튼 — 웹판처럼 흰 동그라미 */
@@ -10572,8 +10775,104 @@ index 0fa6192c..df5277c3 100644
 +    padding-right: 12px;
 +    position: relative;
 +}
++
++/* [entry-local] 톱니바퀴 설정 메뉴 — 웹판(playentry.org)과 같은 모양
++   [회원가입 | ⚙] → 파란 상자 두 줄: [블록 코딩 / 엔트리파이썬] [가 한국어 / A English] */
++.common_gnb .group_box .group_inner.settings_group {
++    padding-right: 0;
++}
++.common_gnb .group_inner.settings_group .work_space {
++    font-size: 14px;
++}
++.btn_entry_local_settings {
++    display: flex;
++    align-items: center;
++    justify-content: center;
++    width: 24px;
++    height: 32px;
++    cursor: pointer;
++}
++.btn_entry_local_settings svg {
++    width: 21px;
++    height: 21px;
++    fill: #93b3ff;
++    transition: fill 0.15s;
++}
++.btn_entry_local_settings:hover svg,
++.btn_entry_local_settings.on svg {
++    fill: #c3d4ff;
++}
++.entry_local_settings_menu {
++    position: absolute;
++    top: 40px;
++    right: -5px;
++    z-index: 1000;
++    width: 136px;
++    box-sizing: border-box;
++    overflow: hidden;
++    border: 1px solid #2350d6;
++    border-radius: 12px;
++    background: #295dea;
++    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
++}
++.entry_local_settings_menu .esm_item {
++    display: flex;
++    align-items: center;
++    width: 100%;
++    height: 50px;
++    margin: 0;
++    padding: 0 10px 0 16px;
++    border: 0;
++    background: transparent;
++    color: #fff;
++    font: inherit;
++    font-size: 14px;
++    font-weight: bold;
++    letter-spacing: -0.3px;
++    text-align: left;
++    white-space: nowrap;
++    cursor: pointer;
++}
++.entry_local_settings_menu .esm_item + .esm_item {
++    border-top: 1px solid #1f4fd2;
++    box-shadow: inset 0 1px 0 #3c6aeb;
++}
++.entry_local_settings_menu .esm_item:hover {
++    background: #2453d8;
++}
++.entry_local_settings_menu .esm_icon {
++    display: inline-flex;
++    align-items: center;
++    justify-content: center;
++    flex: none;
++    width: 22px;
++    height: 22px;
++    margin-right: 6px;
++}
++.entry_local_settings_menu .esm_icon svg {
++    width: 20px;
++    height: 20px;
++    fill: #fff;
++}
++.entry_local_settings_menu .esm_glyph {
++    font-size: 21px;
++    font-weight: bold;
++    line-height: 1;
++}
++.practical_course_mode .entry_local_settings_menu {
++    border-color: #6a5cf0;
++    background: #7466f7;
++}
++/* [entry-local] 기본형 + 성능 구역 — 폭은 내용만큼 */
++.group_inner.mode_group .work_space.perf_space:first-child {
++    margin-left: 0 !important;
++}
++.group_inner.mode_group {
++    width: auto !important;
++    min-width: 0 !important;
++}
 diff --git a/src/renderer/components/header.tsx b/src/renderer/components/header.tsx
-index e7ca0a84..859bb347 100644
+index e7ca0a84..ff452ba9 100644
 --- a/src/renderer/components/header.tsx
 +++ b/src/renderer/components/header.tsx
 @@ -12,6 +12,23 @@ import ImportToggleHelper from '../helper/importToggleHelper';
@@ -10609,7 +10908,7 @@ index e7ca0a84..859bb347 100644
      programLanguageMode: string;
      executionStatus: {
          canRedo: boolean;
-@@ -44,6 +63,79 @@ type DropDownItemPair = [string | ReactElement, string];
+@@ -44,6 +63,134 @@ type DropDownItemPair = [string | ReactElement, string];
  
  class Header extends Component<IProps, IState> {
      dropdownList: any;
@@ -10618,22 +10917,105 @@ index e7ca0a84..859bb347 100644
 +    componentDidMount() {
 +        // [entry-local] 로그인·인터넷 상태가 바뀌면 메뉴 다시 그리기
 +        this.unsubscribeCloud = subscribeCloud(() => this.forceUpdate());
++        document.addEventListener('mousedown', this.handleSettingsOutside, true);
++        document.addEventListener('touchstart', this.handleSettingsOutside, true);
++        document.addEventListener('keydown', this.handleSettingsKey, true);
 +    }
 +
 +    componentWillUnmount() {
 +        this.unsubscribeCloud && this.unsubscribeCloud();
++        document.removeEventListener('mousedown', this.handleSettingsOutside, true);
++        document.removeEventListener('touchstart', this.handleSettingsOutside, true);
++        document.removeEventListener('keydown', this.handleSettingsKey, true);
++    }
++
++    // [entry-local] 웹판과 같은 톱니바퀴 설정 메뉴 (블록 코딩 ↔ 엔트리파이썬, 한국어 ↔ English)
++    private settingsBox: HTMLElement | null = null;
++
++    private handleSettingsOutside = (e: Event) => {
++        if (this.state.dropdownType !== 'settings') {
++            return;
++        }
++        if (this.settingsBox && this.settingsBox.contains(e.target as Node)) {
++            return;
++        }
++        this.setState({ dropdownType: undefined });
++    };
++
++    private handleSettingsKey = (e: KeyboardEvent) => {
++        if (e.key === 'Escape' && this.state.dropdownType === 'settings') {
++            this.setState({ dropdownType: undefined });
++        }
++    };
++
++    private renderSettingsMenu() {
++        const { programLanguageMode, persist } = this.props;
++        const isEn = persist.lang === 'en';
++        const isPython = programLanguageMode === 'python';
++        const showMode = persist.mode === 'workspace';
++        const modeText = isPython ? (isEn ? 'Entry Python' : '엔트리파이썬') : isEn ? 'Block Coding' : '블록 코딩';
++        return (
++            <div className={'entry_local_settings_menu'} role={'menu'}>
++                {showMode && (
++                    <button
++                        type={'button'}
++                        role={'menuitem'}
++                        className={`esm_item esm_mode ${isPython ? 'python' : 'block'}`}
++                        onClick={() => {
++                            // 웹판처럼 메뉴는 열어 둔 채 그 자리에서 모드만 바꾼다
++                            this.props.onProgramLanguageChanged(isPython ? 'block' : 'python');
++                        }}
++                    >
++                        <span className={'esm_icon'} aria-hidden={'true'}>
++                            {isPython ? (
++                                <svg viewBox={'0 0 24 24'}>
++                                    <path d={'M11.9 1.5c-5.3 0-5 2.3-5 2.3v2.4h5.1v.7H4.9S1.5 6.5 1.5 11.9s3 5.2 3 5.2h1.8v-2.5s-.1-3 2.9-3h5.1s2.8 0 2.8-2.7V4.4s.4-2.9-5.2-2.9zM9.1 3.1a.9.9 0 1 1 0 1.8.9.9 0 0 1 0-1.8z'} />
++                                    <path d={'M12.1 22.5c5.3 0 5-2.3 5-2.3v-2.4H12v-.7h7.1s3.4.4 3.4-5S19.5 6.9 19.5 6.9h-1.8v2.5s.1 3-2.9 3H9.7s-2.8 0-2.8 2.7v4.5s-.4 2.9 5.2 2.9zm2.8-1.6a.9.9 0 1 1 0-1.8.9.9 0 0 1 0 1.8z'} />
++                                </svg>
++                            ) : (
++                                <svg viewBox={'0 0 24 24'}>
++                                    <path d={'M3 4.5h1.2l.8 1h14.5a2 2 0 0 1 0 4H5l-.8 1H3a1.5 1.5 0 0 1-1.5-1.5V6A1.5 1.5 0 0 1 3 4.5z'} />
++                                    <path d={'M3 13.5h1.2l.8 1h14.5a2 2 0 0 1 0 4H5l-.8 1H3a1.5 1.5 0 0 1-1.5-1.5V15A1.5 1.5 0 0 1 3 13.5z'} />
++                                </svg>
++                            )}
++                        </span>
++                        <span className={'esm_text'}>{modeText}</span>
++                    </button>
++                )}
++                <button
++                    type={'button'}
++                    role={'menuitem'}
++                    className={'esm_item esm_lang'}
++                    onClick={() => {
++                        this.setState({ dropdownType: undefined });
++                        this.handleChangeLanguage(['', isEn ? 'ko' : 'en']);
++                    }}
++                >
++                    <span className={'esm_icon esm_glyph'} aria-hidden={'true'}>
++                        {isEn ? 'A' : '가'}
++                    </span>
++                    <span className={'esm_text'}>{isEn ? 'English' : '한국어'}</span>
++                </button>
++            </div>
++        );
 +    }
 +
 +    // [entry-local] 툴바 배치를 웹판과 똑같이 맞춘다
 +    //   [파일][저장][?][출력] | 되돌리기·다시실행 | 기본형 [성능▾] | 로그인 회원가입 | 한국어
-+    private localGroups: { print: HTMLElement | null; account: HTMLElement | null; gear: HTMLElement | null } = {
++    private localGroups: {
++        print: HTMLElement | null;
++        account: HTMLElement | null;
++        gear: HTMLElement | null;
++        settings: HTMLElement | null;
++    } = {
 +        print: null,
 +        account: null,
 +        gear: null,
++        settings: null,
 +    };
 +
-+    private setGearGroup(dom: HTMLElement | null) {
-+        this.localGroups.gear = dom;
++    private setPrintGroup(dom: HTMLElement | null) {
++        this.localGroups.print = dom;
 +        if (dom) {
 +            // 렌더가 끝난 직후(화면에 그려지기 전)에 순서를 정리
 +            Promise.resolve().then(this.arrangeToolbar);
@@ -10641,11 +11023,10 @@ index e7ca0a84..859bb347 100644
 +    }
 +
 +    private arrangeToolbar = () => {
-+        const { print, account, gear } = this.localGroups;
-+        if (!print || !gear || !gear.parentElement) {
++        const { print } = this.localGroups;
++        if (!print) {
 +            return;
 +        }
-+        const parent = gear.parentElement;
 +
 +        // 1) 출력 버튼: 물음표(도움말) 바로 오른쪽, 같은 구역
 +        const helpAnchor: HTMLElement | null = this.dropdownList && this.dropdownList.help;
@@ -10657,39 +11038,12 @@ index e7ca0a84..859bb347 100644
 +            }
 +            print.style.display = 'none'; // 비어버린 구역(구분선 포함)은 숨김
 +        }
-+
-+        // 2) 로그인·회원가입: 기본형 뒤 / 한국어 앞
-+        const mine = [print, account, gear];
-+        const langEl: HTMLElement | null = this.dropdownList && this.dropdownList.language;
-+        let langTop: HTMLElement | null = langEl;
-+        while (langTop && langTop.parentElement !== parent) {
-+            langTop = langTop.parentElement;
-+        }
-+        const modeGroups = Array.from(parent.children).filter(
-+            (el) => el.classList.contains('group_inner') && mine.indexOf(el as HTMLElement) < 0 && el !== langTop
-+        );
-+        const modeGroup = modeGroups[modeGroups.length - 1] as HTMLElement | undefined;
-+        if (account && modeGroup && modeGroup.nextElementSibling !== account) {
-+            modeGroup.insertAdjacentElement('afterend', account);
-+        }
-+
-+        // 3) 성능 메뉴(엔진 최적화·부스트·터보): 기본형과 같은 구역 안, 기본형 바로 오른쪽
-+        //    (톱니바퀴 구역은 비게 되므로 숨김)
-+        const modeBox = modeGroup ? (modeGroup.querySelector('.work_space') as HTMLElement | null) : null;
-+        const perfBox = gear.querySelector('.work_space') as HTMLElement | null;
-+        if (modeGroup && modeBox && perfBox) {
-+            if (modeBox.nextElementSibling !== perfBox) {
-+                modeBox.insertAdjacentElement('afterend', perfBox);
-+            }
-+            modeGroup.style.width = 'auto';
-+            modeGroup.style.minWidth = '0';
-+            gear.style.display = 'none';
-+        }
++        // 기본형·성능·계정·톱니바퀴는 JSX에서 웹판 순서대로 그린다 (DOM을 옮기면 언어 전환 때 사라짐)
 +    };
  
      constructor(props: Readonly<IProps>) {
          super(props);
-@@ -63,15 +155,56 @@ class Header extends Component<IProps, IState> {
+@@ -63,15 +210,56 @@ class Header extends Component<IProps, IState> {
      get fileList(): DropDownItemPair[] {
          return [
              [RendererUtils.getLang('Workspace.file_new'), 'new'],
@@ -10750,7 +11104,7 @@ index e7ca0a84..859bb347 100644
      }
  
      get helpList(): DropDownItemPair[] {
-@@ -102,6 +235,17 @@ class Header extends Component<IProps, IState> {
+@@ -102,6 +290,17 @@ class Header extends Component<IProps, IState> {
          ];
      }
  
@@ -10768,7 +11122,7 @@ index e7ca0a84..859bb347 100644
      // noti : 가지고 있는 다국어 종류는 4종류이지만, 운영빌드에서는 관리중인 2종류만 제공
      get languageList(): DropDownItemPair[] {
          return [
-@@ -192,6 +336,12 @@ class Header extends Component<IProps, IState> {
+@@ -192,6 +391,12 @@ class Header extends Component<IProps, IState> {
              case 'language':
                  this.handleChangeLanguage(item);
                  break;
@@ -10781,12 +11135,43 @@ index e7ca0a84..859bb347 100644
          }
      }
  
-@@ -393,6 +543,101 @@ class Header extends Component<IProps, IState> {
+@@ -283,26 +488,7 @@ class Header extends Component<IProps, IState> {
+ 
+                 <div className={'group_box'}>
+                     <div className={'group_inner'}>
+-                        {mode === 'workspace' && (
+-                            // 블록코딩, 엔트리파이선 모드 변경
+-                            <div className={'work_space'}>
+-                                <a
+-                                    title={RendererUtils.getLang('Workspace.language')}
+-                                    className={`btn_work_space btn_workspace_lang ${
+-                                        dropdownType === 'programLanguage' ? 'on' : ''
+-                                    } ${programLanguageMode}`}
+-                                    ref={(dom) => (this.dropdownList.programLanguage = dom)}
+-                                    onClick={() => {
+-                                        this.handleDropdownClick('programLanguage');
+-                                    }}
+-                                >
+-                                    <span className={'blind'}>
+-                                        {RendererUtils.getLang('Workspace.language')}
+-                                    </span>
+-                                </a>
+-                                {this.makeDropdown('programLanguage', this.programLanguageList)}
+-                            </div>
+-                        )}
++                        {/* [entry-local] 블록코딩·엔트리파이선 전환은 웹판처럼 톱니바퀴 메뉴로 옮김 */}
+                         {
+                             // 새로만들기, 불러오기
+                             <div className={'work_space'}>
+@@ -393,9 +579,33 @@ class Header extends Component<IProps, IState> {
                          </div>
                      </div>
  
+-                    {/* 일반형, 교과형 모드변경 */}
+-                    {lang === 'ko' && (
+-                        <div className={'group_inner'}>
 +                    {/* [entry-local] 출력하기 (웹판의 출력 버튼) */}
-+                    <div className={'group_inner'} ref={(dom) => (this.localGroups.print = dom)}>
++                    <div className={'group_inner'} ref={(dom) => this.setPrintGroup(dom)}>
 +                        <div className={'work_space'}>
 +                            <a
 +                                className={'link_workspace_text btn_print_project'}
@@ -10805,6 +11190,48 @@ index e7ca0a84..859bb347 100644
 +                                    <path d="M6 2.4A2.4 2.4 0 0 1 8.4 0H27.6A2.4 2.4 0 0 1 30 2.4V7.54A2.4 2.4 0 0 1 27.6 9.94H8.4A2.4 2.4 0 0 1 6 7.54ZM4 12H32A4 4 0 0 1 36 16V22.94A3 3 0 0 1 33 25.94H29.88V22A4 4 0 0 0 25.88 18H10.12A4 4 0 0 0 6.12 22V25.94H3A3 3 0 0 1 0 22.94V16A4 4 0 0 1 4 12ZM7.9 23.64A3.7 3.7 0 0 1 11.6 19.94H24.4A3.7 3.7 0 0 1 28.1 23.64V32.24A3.7 3.7 0 0 1 24.4 35.94H11.6A3.7 3.7 0 0 1 7.9 32.24Z" />
 +                                </svg>
 +                            </a>
++                        </div>
++                    </div>
++
++                    {/* 일반형, 교과형 모드변경 + [entry-local] 성능 메뉴(기본형 바로 오른쪽, 같은 구역)
++                        영어에서는 기본형이 없으므로 성능 메뉴만 있는 구역 */}
++                    <div className={'group_inner mode_group'}>
++                        {lang === 'ko' && (
+                             <div className={'work_space'}>
+                                 <a
+                                     className={`link_workspace_text text_work_space  ${
+@@ -410,28 +620,105 @@ class Header extends Component<IProps, IState> {
+                                 </a>
+                                 {this.makeDropdown('mode', this.modeList)}
+                             </div>
+-                        </div>
+-                    )}
+-
+-                    {/* 언어 변경 */
+-                    mode === 'workspace' && (
+-                        <div className={'lang_select_box'}>
++                        )}
++                        <div className={'work_space perf_space'}>
+                             <a
+-                                className={`${'select_link'} ${'ico_white_select_arr'} ${
+-                                    dropdownType === 'language' ? 'on' : ''
++                                className={`link_workspace_text text_work_space btn_perf_menu ${
++                                    dropdownType === 'performance' ? 'on' : ''
+                                 }`}
+-                                ref={(dom) => (this.dropdownList.language = dom)}
++                                title={'부스트 모드: GPU로 무대를 그립니다. 터보 모드: 블록을 더 빠르게 실행합니다.'}
++                                ref={(dom) => (this.dropdownList.performance = dom)}
+                                 onClick={() => {
+-                                    this.handleDropdownClick('language');
++                                    this.handleDropdownClick('performance');
+                                 }}
+                             >
+-                                {this.getLangValue()}
++                                성능
+                             </a>
+-                            <div className={'tooltip_box'}>
+-                                {this.makeDropdown('language', this.languageList)}
++                            {this.makeDropdown('performance', this.performanceList)}
 +                        </div>
 +                    </div>
 +
@@ -10857,34 +11284,43 @@ index e7ca0a84..859bb347 100644
 +                                    </a>
 +                                )}
 +                                {this.makeDropdown('account', this.accountList)}
-+                            </div>
-+                        </div>
-+                    )}
+                             </div>
+                         </div>
+                     )}
 +
-+                    {/* [entry-local] 성능 설정 — 렌더 후 기본형 구역 안으로 옮겨진다 (arrangeToolbar) */}
-+                    <div className={'group_inner gear_group'} ref={(dom) => this.setGearGroup(dom)}>
-+                        <div className={'work_space perf_space'}>
++                    {/* [entry-local] 톱니바퀴 설정 메뉴 — 웹판처럼 맨 오른쪽, 모드 전환·언어 전환을 한곳에 */}
++                    <div
++                        className={'group_inner settings_group'}
++                        ref={(dom) => {
++                            this.localGroups.settings = dom;
++                            this.settingsBox = dom;
++                        }}
++                    >
++                        <div className={'work_space'}>
 +                            <a
-+                                className={`link_workspace_text text_work_space btn_perf_menu ${
-+                                    dropdownType === 'performance' ? 'on' : ''
-+                                }`}
-+                                title={'부스트 모드: GPU로 무대를 그립니다. 터보 모드: 블록을 더 빠르게 실행합니다.'}
-+                                ref={(dom) => (this.dropdownList.performance = dom)}
++                                className={`btn_entry_local_settings ${dropdownType === 'settings' ? 'on' : ''}`}
++                                title={lang === 'en' ? 'Settings' : '설정'}
++                                role={'button'}
++                                aria-haspopup={'menu'}
++                                aria-expanded={dropdownType === 'settings'}
 +                                onClick={() => {
-+                                    this.handleDropdownClick('performance');
++                                    this.handleDropdownClick('settings');
 +                                }}
 +                            >
-+                                성능
++                                {/* 웹판 톱니바퀴와 같은 모양: 톱니 8개(22.5° 틀어짐), 사다리꼴 톱니, 큰 가운데 구멍 */}
++                                <svg viewBox={'0 0 48 48'} aria-hidden={'true'}>
++                                    <path d={'M40.8 24A16.8 16.8 0 1 1 7.2 24A16.8 16.8 0 1 1 40.8 24ZM37.19 23.51L43.24 28.51A1.6 1.6 0 0 1 44.11 30.6L42.88 33.55A1.6 1.6 0 0 1 40.79 34.42L32.98 33.67ZM33.67 32.98L34.42 40.79A1.6 1.6 0 0 1 33.55 42.88L30.6 44.11A1.6 1.6 0 0 1 28.51 43.24L23.51 37.19ZM24.49 37.19L19.49 43.24A1.6 1.6 0 0 1 17.4 44.11L14.45 42.88A1.6 1.6 0 0 1 13.58 40.79L14.33 32.98ZM15.02 33.67L7.21 34.42A1.6 1.6 0 0 1 5.12 33.55L3.89 30.6A1.6 1.6 0 0 1 4.76 28.51L10.81 23.51ZM10.81 24.49L4.76 19.49A1.6 1.6 0 0 1 3.89 17.4L5.12 14.45A1.6 1.6 0 0 1 7.21 13.58L15.02 14.33ZM14.33 15.02L13.58 7.21A1.6 1.6 0 0 1 14.45 5.12L17.4 3.89A1.6 1.6 0 0 1 19.49 4.76L24.49 10.81ZM23.51 10.81L28.51 4.76A1.6 1.6 0 0 1 30.6 3.89L33.55 5.12A1.6 1.6 0 0 1 34.42 7.21L33.67 15.02ZM32.98 14.33L40.79 13.58A1.6 1.6 0 0 1 42.88 14.45L44.11 17.4A1.6 1.6 0 0 1 43.24 19.49L37.19 24.49ZM33.6 24A9.6 9.6 0 1 0 14.4 24A9.6 9.6 0 1 0 33.6 24Z'} />
++                                </svg>
++                                <span className={'blind'}>{lang === 'en' ? 'Settings' : '설정'}</span>
 +                            </a>
-+                            {this.makeDropdown('performance', this.performanceList)}
++                            {dropdownType === 'settings' && this.renderSettingsMenu()}
 +                        </div>
 +                    </div>
-+
-                     {/* 일반형, 교과형 모드변경 */}
-                     {lang === 'ko' && (
-                         <div className={'group_inner'}>
+                 </div>
+             </header>
+         );
 diff --git a/src/renderer/components/workspace.tsx b/src/renderer/components/workspace.tsx
-index 32eb38dd..78d1d265 100644
+index 32eb38dd..97c297a8 100644
 --- a/src/renderer/components/workspace.tsx
 +++ b/src/renderer/components/workspace.tsx
 @@ -1,5 +1,5 @@
@@ -10929,6 +11365,7 @@ index 32eb38dd..78d1d265 100644
 +    startCloudState,
 +} from '../helper/cloudState';
 +import { chooseLoginMethod } from '../helper/loginChooser';
++import { showSaveDoneAlert } from '../helper/saveDoneAlert';
 +
 +/** [entry-local] 알림 (엔트리 화면이 아직 준비 중이면 조용히 넘어간다) */
 +function notify(title: string, message: string) {
@@ -10942,11 +11379,10 @@ index 32eb38dd..78d1d265 100644
 +}
 +
 +// [entry-local] 내부 저장소 자동 저장 주기 (변경이 있을 때만)
-+const AUTO_SAVE_INTERVAL = 60 * 1000;
  
  interface IProps extends IReduxDispatch, IReduxState {}
  
-@@ -34,6 +79,13 @@ class Workspace extends Component<IProps> {
+@@ -34,6 +79,12 @@ class Workspace extends Component<IProps> {
      private isFirstRender = true;
      private isSavingCanvasData = false;
      private isSaveProject = false;
@@ -10956,11 +11392,10 @@ index 32eb38dd..78d1d265 100644
 +    private cloudFileId?: string;
 +    private saveTarget: 'local' | 'drive' | 'entry' = 'local';
 +    private entryProjectId?: string; // [entry-local] 엔트리 계정 작품 id
-+    private autoSaveTimer?: number;
      private defaultInitOption = {
          type: 'workspace',
          backpackDisable: true,
-@@ -60,7 +112,15 @@ class Workspace extends Component<IProps> {
+@@ -60,7 +111,15 @@ class Workspace extends Component<IProps> {
      };
  
      get initOption() {
@@ -10977,31 +11412,28 @@ index 32eb38dd..78d1d265 100644
      }
  
      constructor(props: Readonly<IProps>) {
-@@ -86,7 +146,9 @@ class Workspace extends Component<IProps> {
+@@ -86,7 +145,9 @@ class Workspace extends Component<IProps> {
      }
  
      componentDidMount() {
 -        IpcRendererHelper.checkUpdate();
 +        // [entry-local] 업데이트 확인(서버 통신) 하지 않음
-+        this.autoSaveTimer = window.setInterval(this.handleAutoSave, AUTO_SAVE_INTERVAL);
++        // [entry-local] 자동 저장 없음: 사용자가 [저장하기]를 눌렀을 때만 저장한다
 +        startCloudState();
          setTimeout(async () => {
              await this._waitFontLoad();
              try {
-@@ -108,6 +170,12 @@ class Workspace extends Component<IProps> {
+@@ -108,6 +169,9 @@ class Workspace extends Component<IProps> {
          }, 0);
      }
  
 +    componentWillUnmount() {
-+        if (this.autoSaveTimer) {
-+            window.clearInterval(this.autoSaveTimer);
-+        }
 +    }
 +
      componentDidUpdate(prevProps: Readonly<IProps>): void {
          if (
              prevProps.common.projectName &&
-@@ -162,6 +230,14 @@ class Workspace extends Component<IProps> {
+@@ -162,6 +226,14 @@ class Workspace extends Component<IProps> {
          addEventListener('saveAsWorkspace', () => {
              this.handleSaveAction('saveAs');
          });
@@ -11016,7 +11448,7 @@ index 32eb38dd..78d1d265 100644
          addEventListener('saveCanvasImage', (data: any) => {
              this.handleCanvasImageSave(data);
          });
-@@ -373,6 +449,10 @@ class Workspace extends Component<IProps> {
+@@ -373,6 +445,10 @@ class Workspace extends Component<IProps> {
          const project = Entry.exportProject();
          if (project) {
              project.name = this._getProjectName();
@@ -11027,7 +11459,7 @@ index 32eb38dd..78d1d265 100644
              Object.assign(project, option);
              LocalStorageManager.saveProject(project);
          }
-@@ -438,78 +518,438 @@ class Workspace extends Component<IProps> {
+@@ -438,78 +514,437 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -11093,10 +11525,6 @@ index 32eb38dd..78d1d265 100644
 +            }
 +        }
 +        const name = this._getProjectName();
-+        // 엔트리 창에 올라가는 사이 바뀐 내용이 없어지지 않도록 이 기기에도 먼저 저장
-+        if (this.localProjectId) {
-+            await this.saveToLocalStore({ asNew: false, silent: true });
-+        }
 +        this.isSaveProject = true;
 +        try {
 +            Entry.engine && !Entry.engine.isState('stop') && Entry.engine.toggleStop();
@@ -11107,7 +11535,21 @@ index 32eb38dd..78d1d265 100644
 +                this.saveTarget = 'entry';
 +            }
 +            if (result && result.saved) {
-+                notify('엔트리 계정에 저장됨', name);
++                // 웹판 엔트리와 같은 저장 완료 창: [작품 공유하기] [확인]
++                this.isSaveProject = false;
++                const entryUser = getCloudState().entry;
++                const choice = await showSaveDoneAlert({ canShare: !entryUser || entryUser.canShare !== false });
++                if (choice === 'share' && result.projectId) {
++                    try {
++                        const shared = await entryApi.share(result.projectId);
++                        if (shared && shared.shared) {
++                            notify('작품 공유하기', `'${name}' 작품을 공유했습니다.`);
++                        }
++                    } catch (err) {
++                        console.error(err);
++                        EntryModalHelper.getAlertModal(`작품 공유하기 화면을 열지 못했습니다.\n${cloudErrorMessage(err)}`);
++                    }
++                }
 +            } else if (result && result.failed) {
 +                EntryModalHelper.getAlertModal('엔트리 계정에 저장하지 못했습니다.\n작품은 그대로 있으니 잠시 후 다시 시도해 주세요.');
 +            } else {
@@ -11384,17 +11826,6 @@ index 32eb38dd..78d1d265 100644
 -                    filters: [{ name: 'Entry File', extensions: ['ent'] }],
 -                },
 -                saveFunction
-+    handleAutoSave = async () => {
-+        // 한 번 이상 저장된 작품만, 바뀐 내용이 있고, 실행 중이 아닐 때 조용히 저장 (이 기기 저장 작품만)
-+        if (!this.localProjectId || this.saveTarget !== 'local' || this.isSaveProject) {
-+            return;
-+        }
-+        const { engine, stateManager } = Entry;
-+        if (!stateManager || stateManager.isSaved() || (engine && !engine.isState('stop'))) {
-+            return;
-+        }
-+        await this.saveToLocalStore({ asNew: false, silent: true });
-+    };
 +
 +    exportToFile = async () => {
 +        const projectName = this._getProjectName();
@@ -11518,7 +11949,7 @@ index 32eb38dd..78d1d265 100644
      };
  
      handleFileAction = async (type: string) => {
-@@ -518,6 +958,10 @@ class Workspace extends Component<IProps> {
+@@ -518,6 +953,10 @@ class Workspace extends Component<IProps> {
                  await RendererUtils.clearTempProject();
                  await this.loadProject();
              }
@@ -11529,7 +11960,7 @@ index 32eb38dd..78d1d265 100644
          } else if (type === 'open_offline') {
              this._loadProjectFromFile(
                  () =>
-@@ -576,11 +1020,33 @@ class Workspace extends Component<IProps> {
+@@ -576,11 +1015,33 @@ class Workspace extends Component<IProps> {
          let projectWorkspaceMode = currentWorkspaceMode;
  
          if (project) {
@@ -11563,7 +11994,7 @@ index 32eb38dd..78d1d265 100644
              delete this.projectSavedPath;
              delete this.projectParent;
              CommonActions.changeProjectName(RendererUtils.getDefaultProjectName());
-@@ -602,8 +1068,14 @@ class Workspace extends Component<IProps> {
+@@ -602,8 +1063,14 @@ class Workspace extends Component<IProps> {
          }
          Entry.reloadBlock();
          this.isFirstRender = false;
@@ -11578,7 +12009,7 @@ index 32eb38dd..78d1d265 100644
          try {
              if (project) {
                  await Entry.loadExternalModules(project);
-@@ -633,9 +1105,38 @@ class Workspace extends Component<IProps> {
+@@ -633,9 +1100,38 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -11617,7 +12048,7 @@ index 32eb38dd..78d1d265 100644
          await this.loadProject(project);
      };
  
-@@ -717,6 +1218,8 @@ class Workspace extends Component<IProps> {
+@@ -717,6 +1213,8 @@ class Workspace extends Component<IProps> {
                          onFileAction={this.handleFileAction}
                          onReloadProject={this.reloadProject}
                          onLoadProject={this.loadProject}
@@ -11628,16 +12059,16 @@ index 32eb38dd..78d1d265 100644
                          executionStatus={executionStatus}
 diff --git a/src/renderer/helper/cloudState.ts b/src/renderer/helper/cloudState.ts
 new file mode 100644
-index 00000000..833bf0d3
+index 00000000..480afb19
 --- /dev/null
 +++ b/src/renderer/helper/cloudState.ts
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,199 @@
 +/**
 + * [entry-local] 구글 드라이브·엔트리 계정 로그인 상태 + 인터넷 연결 상태
 + * 상단 메뉴·내 작품 창·저장 메뉴가 같이 쓴다.
 + */
 +
-+export type EntryUser = { id: string; username: string; nickname: string };
++export type EntryUser = { id: string; username: string; nickname: string; canShare?: boolean };
 +export type EntryStatus = { loggedIn: boolean; user?: EntryUser };
 +
 +export type CloudStatus = {
@@ -11789,6 +12220,7 @@ index 00000000..833bf0d3
 +    load: (projectId: string, name: string) => window.ipcInvoke<any>('entry:load', projectId, name),
 +    saveViaSite: (project: any, options: { entryProjectId?: string; name: string }) =>
 +        window.ipcInvoke<{ projectId?: string; saved?: boolean; failed?: boolean }>('entry:saveViaSite', project, options),
++    share: (projectId: string) => window.ipcInvoke<{ shared?: boolean }>('entry:share', projectId),
 +};
 +
 +export const accountApi = {
@@ -12576,423 +13008,6 @@ index 00000000..bfff941b
 +    }
 +    location.reload();
 +}
-diff --git a/src/renderer/helper/printProject.ts b/src/renderer/helper/printProject.ts
-new file mode 100644
-index 00000000..4b7c1f2a
---- /dev/null
-+++ b/src/renderer/helper/printProject.ts
-@@ -0,0 +1,411 @@
-+/**
-+ * [entry-local] 출력하기 — 웹판(playentry.org/print)의 출력 화면과 같은 구성으로
-+ * 작품 이름, 작품 전체 무대, 장면별 무대, 오브젝트 표(그림 · 속성 · 코드)를 한 화면에 모아 보여 주고 인쇄한다.
-+ *
-+ * - 서버와 통신하지 않는다. 지금 열려 있는 작품(Entry)에서 바로 읽는다.
-+ * - 코드 그림은 코드 화면(블록 SVG)을 그대로 떠서 넣는다. 블록 모양은 지금 화면과 같다.
-+ * - 인쇄: Windows 는 window.print(), 안드로이드는 앱 안 플러그인(EntryAccount.printPage)으로 시스템 인쇄 창을 띄운다.
-+ */
-+
-+const OVERLAY_ID = 'entry-local-print';
-+const STYLE_ID = 'entry-local-print-style';
-+
-+const entry = (): any => (window as any).Entry;
-+const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-+
-+function esc(value: any): string {
-+    const map: { [key: string]: string } = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-+    return String(value === undefined || value === null ? '' : value).replace(/[&<>"']/g, (c) => map[c]);
-+}
-+
-+function num(value: any, digits = 0): string {
-+    const n = Number(value);
-+    return isFinite(n) ? n.toFixed(digits) : '0';
-+}
-+
-+function trimmed(value: any): string {
-+    const n = Number(value);
-+    return isFinite(n) ? String(Number(n.toFixed(1))) : '0';
-+}
-+
-+/** 지금 보이는 장면의 무대를 그림(JPEG)으로 */
-+function stageImage(): string | undefined {
-+    try {
-+        const stage = entry().stage;
-+        if (stage && stage.handle && stage.handle.setVisible) {
-+            stage.handle.setVisible(false);
-+        }
-+        if (stage && stage.update) {
-+            stage.update();
-+        }
-+        const source: HTMLCanvasElement | undefined = stage && stage.canvas && stage.canvas.canvas;
-+        if (!source || !source.width || !source.height) {
-+            return undefined;
-+        }
-+        const canvas = document.createElement('canvas');
-+        canvas.width = source.width;
-+        canvas.height = source.height;
-+        const context = canvas.getContext('2d');
-+        if (!context) {
-+            return undefined;
-+        }
-+        context.fillStyle = '#ffffff';
-+        context.fillRect(0, 0, canvas.width, canvas.height);
-+        context.drawImage(source, 0, 0);
-+        return canvas.toDataURL('image/jpeg', 0.85);
-+    } catch (e) {
-+        console.warn('stage image failed', e);
-+        return undefined;
-+    }
-+}
-+
-+/** 오브젝트 목록에 보이는 그림을 그대로 가져오고, 안 되면 그림 파일 주소로 */
-+function objectThumb(object: any): string | undefined {
-+    try {
-+        const view: HTMLElement | undefined = object.view_;
-+        if (view && view.querySelector) {
-+            const canvas = view.querySelector('canvas') as HTMLCanvasElement | null;
-+            if (canvas && canvas.width) {
-+                return canvas.toDataURL('image/png');
-+            }
-+            const img = view.querySelector('img') as HTMLImageElement | null;
-+            if (img && img.src) {
-+                return img.src;
-+            }
-+            const nodes = view.querySelectorAll('div');
-+            for (let i = 0; i < nodes.length; i += 1) {
-+                const bg = getComputedStyle(nodes[i]).backgroundImage;
-+                const found = bg && /url\(["']?(.*?)["']?\)/.exec(bg);
-+                if (found && found[1]) {
-+                    return found[1];
-+                }
-+            }
-+        }
-+        if (object.thumbUrl) {
-+            return object.thumbUrl;
-+        }
-+        const picture =
-+            (object.entity && object.entity.picture) ||
-+            object.selectedPicture ||
-+            (object.pictures && object.pictures[0]);
-+        if (picture) {
-+            if (picture.fileurl) {
-+                return picture.fileurl;
-+            }
-+            if (picture.filename) {
-+                const f: string = picture.filename;
-+                const ext = picture.imageType === 'svg' ? 'svg' : 'png';
-+                return `${entry().defaultPath || ''}/uploads/${f.substring(0, 2)}/${f.substring(2, 4)}/image/${f}.${ext}`;
-+            }
-+        }
-+    } catch (e) {
-+        console.warn('thumbnail failed', e);
-+    }
-+    return undefined;
-+}
-+
-+const COPY_STYLES = [
-+    'fill',
-+    'fill-opacity',
-+    'stroke',
-+    'stroke-width',
-+    'stroke-opacity',
-+    'font-family',
-+    'font-size',
-+    'font-weight',
-+    'opacity',
-+    'display',
-+    'visibility',
-+];
-+
-+/** 코드 화면(블록 SVG)을 잘라서 하나의 SVG 문자열로. 지금 선택된 오브젝트의 코드가 대상 */
-+function codeSvg(): string | undefined {
-+    try {
-+        const workspace = entry().getMainWS && entry().getMainWS();
-+        const board = workspace && (workspace.board || (workspace.getBoard && workspace.getBoard()));
-+        const group: SVGGraphicsElement | undefined = board && (board.svgBlockGroup || board.svgGroup);
-+        if (!group || !group.firstChild || !group.getBBox) {
-+            return undefined;
-+        }
-+        const box = group.getBBox();
-+        if (!box || !box.width || !box.height) {
-+            return undefined;
-+        }
-+        const clone = group.cloneNode(true) as SVGGraphicsElement;
-+        const originals = group.querySelectorAll('*');
-+        const copies = clone.querySelectorAll('*');
-+        for (let i = 0; i < originals.length && i < copies.length; i += 1) {
-+            const computed = getComputedStyle(originals[i]);
-+            const target = copies[i] as unknown as HTMLElement;
-+            COPY_STYLES.forEach((name) => {
-+                const value = computed.getPropertyValue(name);
-+                if (value && target.style) {
-+                    target.style.setProperty(name, value);
-+                }
-+            });
-+        }
-+        clone.removeAttribute('transform');
-+        const pad = 8;
-+        const width = Math.ceil(box.width + pad * 2);
-+        const height = Math.ceil(box.height + pad * 2);
-+        return (
-+            `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
-+            `viewBox="${box.x - pad} ${box.y - pad} ${width} ${height}" width="${width}" height="${height}">` +
-+            new XMLSerializer().serializeToString(clone) +
-+            '</svg>'
-+        );
-+    } catch (e) {
-+        console.warn('code capture failed', e);
-+        return undefined;
-+    }
-+}
-+
-+interface PrintObject {
-+    name: string;
-+    thumb?: string;
-+    x: string;
-+    y: string;
-+    size: string;
-+    rotation: string;
-+    direction: string;
-+    code?: string;
-+}
-+
-+interface PrintScene {
-+    name: string;
-+    image?: string;
-+    objects: PrintObject[];
-+}
-+
-+/** 작품 전체를 읽는다. 장면·오브젝트를 하나씩 선택해 그림을 뜨고, 끝나면 원래 선택으로 되돌린다. */
-+async function collect(): Promise<{ projectImage?: string; scenes: PrintScene[] }> {
-+    const E = entry();
-+    const sceneApi = E.scene;
-+    const scenes: any[] = (sceneApi && sceneApi.getScenes && sceneApi.getScenes()) || [];
-+    const objects: any[] = (E.container && E.container.getAllObjects && E.container.getAllObjects()) || [];
-+    const originalScene = sceneApi && sceneApi.selectedScene;
-+    const originalObject = E.playground && E.playground.object;
-+
-+    const projectImage = stageImage();
-+    const result: PrintScene[] = [];
-+
-+    const readObject = async (object: any): Promise<PrintObject> => {
-+        let code: string | undefined;
-+        try {
-+            E.container.selectObject(object.id, true);
-+            await wait(180);
-+            code = codeSvg();
-+        } catch (e) {
-+            console.warn('select object failed', e);
-+        }
-+        const entity = object.entity || {};
-+        const get = (fn: string, fallback = 0) => (entity[fn] ? entity[fn]() : fallback);
-+        return {
-+            name: object.name || '',
-+            thumb: objectThumb(object),
-+            x: trimmed(get('getX')),
-+            y: trimmed(get('getY')),
-+            size: num(get('getSize', 100), 1),
-+            rotation: `${num(get('getRotation'))}°`,
-+            direction: `${num(get('getDirection', 90))}°`,
-+            code,
-+        };
-+    };
-+
-+    if (scenes.length === 0) {
-+        const list: PrintObject[] = [];
-+        for (const object of objects) {
-+            list.push(await readObject(object));
-+        }
-+        result.push({ name: '장면 1', image: projectImage, objects: list });
-+    } else {
-+        for (const scene of scenes) {
-+            try {
-+                if (sceneApi.selectedScene !== scene) {
-+                    sceneApi.selectScene(scene);
-+                    await wait(350);
-+                }
-+            } catch (e) {
-+                console.warn('select scene failed', e);
-+            }
-+            const image = stageImage();
-+            const list: PrintObject[] = [];
-+            for (const object of objects.filter((o) => o.scene && o.scene.id === scene.id)) {
-+                list.push(await readObject(object));
-+            }
-+            result.push({ name: scene.name || '장면', image, objects: list });
-+        }
-+    }
-+
-+    try {
-+        if (originalScene && sceneApi.selectedScene !== originalScene) {
-+            sceneApi.selectScene(originalScene);
-+            await wait(200);
-+        }
-+        if (originalObject) {
-+            E.container.selectObject(originalObject.id, true);
-+        }
-+    } catch (e) {
-+        console.warn('restore selection failed', e);
-+    }
-+    return { projectImage, scenes: result };
-+}
-+
-+const PRINT_ICON =
-+    '<svg viewBox="0 0 36 36"><path d="M6 2.4A2.4 2.4 0 0 1 8.4 0H27.6A2.4 2.4 0 0 1 30 2.4V7.54A2.4 2.4 0 0 1 27.6 9.94H8.4A2.4 2.4 0 0 1 6 7.54ZM4 12H32A4 4 0 0 1 36 16V22.94A3 3 0 0 1 33 25.94H29.88V22A4 4 0 0 0 25.88 18H10.12A4 4 0 0 0 6.12 22V25.94H3A3 3 0 0 1 0 22.94V16A4 4 0 0 1 4 12ZM7.9 23.64A3.7 3.7 0 0 1 11.6 19.94H24.4A3.7 3.7 0 0 1 28.1 23.64V32.24A3.7 3.7 0 0 1 24.4 35.94H11.6A3.7 3.7 0 0 1 7.9 32.24Z"/></svg>';
-+
-+const STYLE = `
-+#${OVERLAY_ID}{position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483000;background:#fff;overflow:auto;font-family:'NanumGothic','Nanum Gothic',sans-serif;color:#222;-webkit-overflow-scrolling:touch}
-+#${OVERLAY_ID} .elp-bar{position:sticky;top:0;z-index:2;display:flex;align-items:center;height:52px;padding:0 20px;background:#4f80ff;color:#fff}
-+#${OVERLAY_ID} .elp-bar .elp-dot{width:5px;height:5px;border-radius:50%;background:#fff;margin-right:14px}
-+#${OVERLAY_ID} .elp-bar .elp-title{flex:1;font-size:22px;font-weight:bold}
-+#${OVERLAY_ID} .elp-bar button{display:inline-flex;align-items:center;justify-content:center;border:0;cursor:pointer;margin-left:12px}
-+#${OVERLAY_ID} .elp-print{width:38px;height:38px;border-radius:50%;background:#fff}
-+#${OVERLAY_ID} .elp-print svg{width:19px;height:19px;fill:#4f80ff}
-+#${OVERLAY_ID} .elp-close{height:34px;padding:0 14px;border-radius:17px;background:rgba(255,255,255,.2);color:#fff;font-size:15px}
-+#${OVERLAY_ID} .elp-page{padding:24px 40px 60px;max-width:1100px}
-+#${OVERLAY_ID} h1{font-size:26px;margin:12px 0 14px}
-+#${OVERLAY_ID} h2{font-size:21px;margin:30px 0 12px}
-+#${OVERLAY_ID} h2:before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:#4f80ff;margin-right:12px;vertical-align:top}
-+#${OVERLAY_ID} .elp-stage{border:1px solid #cdeee8;background:#fff;display:flex;align-items:center;justify-content:center}
-+#${OVERLAY_ID} .elp-stage.big{width:100%;max-width:960px;aspect-ratio:16/9}
-+#${OVERLAY_ID} .elp-stage.small{width:70%;max-width:700px;aspect-ratio:16/9}
-+#${OVERLAY_ID} .elp-stage img{max-width:100%;max-height:100%;display:block}
-+#${OVERLAY_ID} .elp-note{color:#888;font-size:14px}
-+#${OVERLAY_ID} hr{border:0;border-top:2px solid #d5e6f3;margin:34px 0 0}
-+#${OVERLAY_ID} .elp-table{margin-top:26px;border:1px solid #b9d3e8;border-radius:22px;overflow:hidden}
-+#${OVERLAY_ID} .elp-row{display:grid;grid-template-columns:22% 24% 54%;border-top:1px solid #b9d3e8;break-inside:avoid;page-break-inside:avoid}
-+#${OVERLAY_ID} .elp-row.head{background:#d6e6f4;border-top:0;font-weight:bold;text-align:center;font-size:17px}
-+#${OVERLAY_ID} .elp-row.head div{padding:16px 6px}
-+#${OVERLAY_ID} .elp-cell{padding:18px 14px;border-left:1px solid #b9d3e8;min-width:0}
-+#${OVERLAY_ID} .elp-cell:first-child{border-left:0;text-align:center}
-+#${OVERLAY_ID} .elp-thumb{display:inline-block;width:110px;border:1px solid #d5e6f3;border-radius:10px;overflow:hidden;background:#fff}
-+#${OVERLAY_ID} .elp-thumb .img{height:90px;display:flex;align-items:center;justify-content:center}
-+#${OVERLAY_ID} .elp-thumb img{max-width:90%;max-height:85px}
-+#${OVERLAY_ID} .elp-thumb .name{background:#d6e6f4;font-size:13px;padding:6px 4px;word-break:break-all}
-+#${OVERLAY_ID} .elp-prop{display:flex;font-size:15px;line-height:2.1}
-+#${OVERLAY_ID} .elp-prop b{width:52%}
-+#${OVERLAY_ID} .elp-code svg{max-width:100%;height:auto;display:block}
-+@media print{
-+  body > *:not(#${OVERLAY_ID}){display:none !important}
-+  html,body{height:auto !important;overflow:visible !important;background:#fff !important}
-+  #${OVERLAY_ID}{position:static !important;overflow:visible !important;height:auto !important}
-+  #${OVERLAY_ID} .elp-bar{display:none !important}
-+  #${OVERLAY_ID} .elp-page{padding:0;max-width:none}
-+  @page{margin:12mm}
-+}`;
-+
-+function ensureStyle() {
-+    if (!document.getElementById(STYLE_ID)) {
-+        const style = document.createElement('style');
-+        style.id = STYLE_ID;
-+        style.textContent = STYLE;
-+        document.head.appendChild(style);
-+    }
-+}
-+
-+async function doPrint(title: string) {
-+    const cap = (window as any).Capacitor;
-+    const plugin = cap && cap.Plugins && cap.Plugins.EntryAccount;
-+    if (cap && cap.isNativePlatform && cap.isNativePlatform() && plugin && plugin.printPage) {
-+        try {
-+            await plugin.printPage({ title });
-+            return;
-+        } catch (e) {
-+            console.warn('native print failed', e);
-+        }
-+    }
-+    window.print();
-+}
-+
-+function closeOverlay() {
-+    const old = document.getElementById(OVERLAY_ID);
-+    if (old && old.parentNode) {
-+        old.parentNode.removeChild(old);
-+    }
-+}
-+
-+function render(title: string, data: { projectImage?: string; scenes: PrintScene[] }) {
-+    const stage = (image: string | undefined, cls: string) =>
-+        `<div class="elp-stage ${cls}">${image ? `<img src="${image}">` : '<span class="elp-note">무대 그림을 가져오지 못했습니다.</span>'}</div>`;
-+
-+    const rows = (objects: PrintObject[]) =>
-+        objects
-+            .map(
-+                (o) => `
-+<div class="elp-row">
-+  <div class="elp-cell"><div class="elp-thumb"><div class="img">${o.thumb ? `<img src="${esc(o.thumb)}">` : ''}</div><div class="name">${esc(o.name)}</div></div></div>
-+  <div class="elp-cell">
-+    <div class="elp-prop"><b>X</b><span>${esc(o.x)}</span></div>
-+    <div class="elp-prop"><b>Y</b><span>${esc(o.y)}</span></div>
-+    <div class="elp-prop"><b>크기</b><span>${esc(o.size)}</span></div>
-+    <div class="elp-prop"><b>이동 방향(°)</b><span>${esc(o.direction)}</span></div>
-+    <div class="elp-prop"><b>방향(°)</b><span>${esc(o.rotation)}</span></div>
-+  </div>
-+  <div class="elp-cell elp-code">${o.code || '<span class="elp-note">코드를 가져오지 못했습니다. (블록 코딩 화면에서 출력해 주세요)</span>'}</div>
-+</div>`
-+            )
-+            .join('');
-+
-+    const sections = data.scenes
-+        .map(
-+            (scene) => `
-+<h2>${esc(scene.name)}</h2>
-+${stage(scene.image, 'small')}
-+<div class="elp-table">
-+  <div class="elp-row head"><div>오브젝트</div><div>속성</div><div>코드</div></div>
-+  ${rows(scene.objects)}
-+</div>`
-+        )
-+        .join('');
-+
-+    const overlay = document.getElementById(OVERLAY_ID);
-+    if (!overlay) {
-+        return;
-+    }
-+    const page = overlay.querySelector('.elp-page');
-+    if (page) {
-+        page.innerHTML = `<h1>${esc(title)}</h1>${stage(data.projectImage, 'big')}<hr>${sections}`;
-+    }
-+}
-+
-+/** 출력 화면을 열고 작품 내용을 채운다 */
-+export async function openPrintView(projectName?: string) {
-+    const E = entry();
-+    if (!E || !E.container) {
-+        return;
-+    }
-+    if (E.engine && E.engine.isState && E.engine.isState('run')) {
-+        try {
-+            E.toast.warning('출력하기', '작품 실행을 멈춘 뒤에 출력해 주세요.');
-+        } catch (e) {
-+            alert('작품 실행을 멈춘 뒤에 출력해 주세요.');
-+        }
-+        return;
-+    }
-+    ensureStyle();
-+    closeOverlay();
-+    const title = projectName || '엔트리 작품';
-+    const overlay = document.createElement('div');
-+    overlay.id = OVERLAY_ID;
-+    overlay.innerHTML =
-+        `<div class="elp-bar"><span class="elp-dot"></span><span class="elp-title">출력하기</span>` +
-+        `<button class="elp-close" type="button">닫기</button>` +
-+        `<button class="elp-print" type="button" title="인쇄">${PRINT_ICON}</button></div>` +
-+        `<div class="elp-page"><p class="elp-note">출력 화면을 만드는 중입니다…</p></div>`;
-+    document.body.appendChild(overlay);
-+    (overlay.querySelector('.elp-close') as HTMLElement).onclick = closeOverlay;
-+    (overlay.querySelector('.elp-print') as HTMLElement).onclick = () => {
-+        doPrint(title);
-+    };
-+
-+    try {
-+        render(title, await collect());
-+    } catch (e) {
-+        console.error(e);
-+        const page = overlay.querySelector('.elp-page');
-+        if (page) {
-+            page.innerHTML = '<p class="elp-note">출력 화면을 만들지 못했습니다.</p>';
-+        }
-+    }
-+}
 diff --git a/src/renderer/helper/ipcRendererHelper.ts b/src/renderer/helper/ipcRendererHelper.ts
 index fbdd0052..13ba8c1d 100644
 --- a/src/renderer/helper/ipcRendererHelper.ts
@@ -13039,7 +13054,7 @@ index fbdd0052..13ba8c1d 100644
      }
 diff --git a/src/renderer/helper/localProjectModal.ts b/src/renderer/helper/localProjectModal.ts
 new file mode 100644
-index 00000000..3108ac84
+index 00000000..d0a2470b
 --- /dev/null
 +++ b/src/renderer/helper/localProjectModal.ts
 @@ -0,0 +1,647 @@
@@ -13690,9 +13705,82 @@ index 00000000..3108ac84
 +    }
 +    search.focus();
 +}
+diff --git a/src/renderer/helper/loginAlert.ts b/src/renderer/helper/loginAlert.ts
+new file mode 100644
+index 00000000..1779a3c0
+--- /dev/null
++++ b/src/renderer/helper/loginAlert.ts
+@@ -0,0 +1,67 @@
++/**
++ * [entry-local] "로그인 후 이용할 수 있습니다." 알림창
++ * 웹판 엔트리(playentry.org)의 알림창과 같은 모양: 파란 머리띠(알림 · 닫기) + 안내 문구 + 로그인 버튼
++ */
++const OVERLAY_ID = 'entry-local-login-alert';
++const STYLE_ID = 'entry-local-login-alert-style';
++
++const CSS = `
++#${OVERLAY_ID}{position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);font-family:inherit}
++#${OVERLAY_ID} .ela-box{width:400px;max-width:calc(100vw - 32px);background:#fff;border-radius:6px;overflow:hidden;box-shadow:0 6px 24px rgba(0,0,0,.25)}
++#${OVERLAY_ID} .ela-head{position:relative;display:flex;align-items:center;height:56px;padding:0 26px;background:#4f80ff;color:#fff;font-size:22px;font-weight:bold}
++#${OVERLAY_ID} .ela-close{position:absolute;top:50%;right:30px;width:26px;height:26px;margin-top:-13px;padding:0;border:0;background:none;cursor:pointer}
++#${OVERLAY_ID} .ela-close:before,#${OVERLAY_ID} .ela-close:after{content:"";position:absolute;top:50%;left:50%;width:26px;height:3px;margin:-1.5px 0 0 -13px;background:#fff;border-radius:2px}
++#${OVERLAY_ID} .ela-close:before{transform:rotate(45deg)}
++#${OVERLAY_ID} .ela-close:after{transform:rotate(-45deg)}
++#${OVERLAY_ID} .ela-body{padding:36px 24px 36px;text-align:center}
++#${OVERLAY_ID} .ela-msg{margin:0 0 36px;color:#333;font-size:20px;font-weight:bold;line-height:1.4}
++#${OVERLAY_ID} .ela-ok{width:152px;height:49px;border:0;border-radius:4px;background:#4f80ff;color:#fff;font-size:19px;font-weight:bold;cursor:pointer}
++#${OVERLAY_ID} .ela-ok:active{background:#3f6fe8}
++`;
++
++function ensureStyle() {
++    if (document.getElementById(STYLE_ID)) {
++        return;
++    }
++    const style = document.createElement('style');
++    style.id = STYLE_ID;
++    style.textContent = CSS;
++    document.head.appendChild(style);
++}
++
++export function closeLoginAlert() {
++    const overlay = document.getElementById(OVERLAY_ID);
++    if (overlay && overlay.parentElement) {
++        overlay.parentElement.removeChild(overlay);
++    }
++    document.removeEventListener('keydown', onKeyDown, true);
++}
++
++function onKeyDown(event: KeyboardEvent) {
++    if (event.key === 'Escape') {
++        closeLoginAlert();
++    }
++}
++
++/** 알림창을 띄운다. 로그인 버튼을 누르면 창을 닫고 onLogin 을 호출한다. */
++export function showLoginAlert(onLogin?: () => void, message = '로그인 후 이용할 수 있습니다.') {
++    ensureStyle();
++    closeLoginAlert();
++    const overlay = document.createElement('div');
++    overlay.id = OVERLAY_ID;
++    overlay.innerHTML =
++        '<div class="ela-box" role="alertdialog" aria-modal="true">' +
++        '<div class="ela-head">알림<button class="ela-close" type="button" aria-label="닫기"></button></div>' +
++        '<div class="ela-body"><p class="ela-msg"></p><button class="ela-ok" type="button">로그인</button></div>' +
++        '</div>';
++    (overlay.querySelector('.ela-msg') as HTMLElement).textContent = message;
++    (overlay.querySelector('.ela-close') as HTMLElement).onclick = closeLoginAlert;
++    (overlay.querySelector('.ela-ok') as HTMLElement).onclick = () => {
++        closeLoginAlert();
++        if (onLogin) {
++            onLogin();
++        }
++    };
++    document.body.appendChild(overlay);
++    document.addEventListener('keydown', onKeyDown, true);
++}
 diff --git a/src/renderer/helper/loginChooser.ts b/src/renderer/helper/loginChooser.ts
 new file mode 100644
-index 00000000..eeaef748
+index 00000000..68198a2e
 --- /dev/null
 +++ b/src/renderer/helper/loginChooser.ts
 @@ -0,0 +1,229 @@
@@ -13923,6 +14011,499 @@ index 00000000..eeaef748
 +        backdrop.appendChild(box);
 +        document.body.appendChild(backdrop);
 +        ok.focus();
++    });
++}
+diff --git a/src/renderer/helper/printProject.ts b/src/renderer/helper/printProject.ts
+new file mode 100644
+index 00000000..eac25930
+--- /dev/null
++++ b/src/renderer/helper/printProject.ts
+@@ -0,0 +1,411 @@
++/**
++ * [entry-local] 출력하기 — 웹판(playentry.org/print)의 출력 화면과 같은 구성으로
++ * 작품 이름, 작품 전체 무대, 장면별 무대, 오브젝트 표(그림 · 속성 · 코드)를 한 화면에 모아 보여 주고 인쇄한다.
++ *
++ * - 서버와 통신하지 않는다. 지금 열려 있는 작품(Entry)에서 바로 읽는다.
++ * - 코드 그림은 코드 화면(블록 SVG)을 그대로 떠서 넣는다. 블록 모양은 지금 화면과 같다.
++ * - 인쇄: Windows 는 window.print(), 안드로이드는 앱 안 플러그인(EntryAccount.printPage)으로 시스템 인쇄 창을 띄운다.
++ */
++
++const OVERLAY_ID = 'entry-local-print';
++const STYLE_ID = 'entry-local-print-style';
++
++const entry = (): any => (window as any).Entry;
++const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
++
++function esc(value: any): string {
++    const map: { [key: string]: string } = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
++    return String(value === undefined || value === null ? '' : value).replace(/[&<>"']/g, (c) => map[c]);
++}
++
++function num(value: any, digits = 0): string {
++    const n = Number(value);
++    return isFinite(n) ? n.toFixed(digits) : '0';
++}
++
++function trimmed(value: any): string {
++    const n = Number(value);
++    return isFinite(n) ? String(Number(n.toFixed(1))) : '0';
++}
++
++/** 지금 보이는 장면의 무대를 그림(JPEG)으로 */
++function stageImage(): string | undefined {
++    try {
++        const stage = entry().stage;
++        if (stage && stage.handle && stage.handle.setVisible) {
++            stage.handle.setVisible(false);
++        }
++        if (stage && stage.update) {
++            stage.update();
++        }
++        const source: HTMLCanvasElement | undefined = stage && stage.canvas && stage.canvas.canvas;
++        if (!source || !source.width || !source.height) {
++            return undefined;
++        }
++        const canvas = document.createElement('canvas');
++        canvas.width = source.width;
++        canvas.height = source.height;
++        const context = canvas.getContext('2d');
++        if (!context) {
++            return undefined;
++        }
++        context.fillStyle = '#ffffff';
++        context.fillRect(0, 0, canvas.width, canvas.height);
++        context.drawImage(source, 0, 0);
++        return canvas.toDataURL('image/jpeg', 0.85);
++    } catch (e) {
++        console.warn('stage image failed', e);
++        return undefined;
++    }
++}
++
++/** 오브젝트 목록에 보이는 그림을 그대로 가져오고, 안 되면 그림 파일 주소로 */
++function objectThumb(object: any): string | undefined {
++    try {
++        const view: HTMLElement | undefined = object.view_;
++        if (view && view.querySelector) {
++            const canvas = view.querySelector('canvas') as HTMLCanvasElement | null;
++            if (canvas && canvas.width) {
++                return canvas.toDataURL('image/png');
++            }
++            const img = view.querySelector('img') as HTMLImageElement | null;
++            if (img && img.src) {
++                return img.src;
++            }
++            const nodes = view.querySelectorAll('div');
++            for (let i = 0; i < nodes.length; i += 1) {
++                const bg = getComputedStyle(nodes[i]).backgroundImage;
++                const found = bg && /url\(["']?(.*?)["']?\)/.exec(bg);
++                if (found && found[1]) {
++                    return found[1];
++                }
++            }
++        }
++        if (object.thumbUrl) {
++            return object.thumbUrl;
++        }
++        const picture =
++            (object.entity && object.entity.picture) ||
++            object.selectedPicture ||
++            (object.pictures && object.pictures[0]);
++        if (picture) {
++            if (picture.fileurl) {
++                return picture.fileurl;
++            }
++            if (picture.filename) {
++                const f: string = picture.filename;
++                const ext = picture.imageType === 'svg' ? 'svg' : 'png';
++                return `${entry().defaultPath || ''}/uploads/${f.substring(0, 2)}/${f.substring(2, 4)}/image/${f}.${ext}`;
++            }
++        }
++    } catch (e) {
++        console.warn('thumbnail failed', e);
++    }
++    return undefined;
++}
++
++const COPY_STYLES = [
++    'fill',
++    'fill-opacity',
++    'stroke',
++    'stroke-width',
++    'stroke-opacity',
++    'font-family',
++    'font-size',
++    'font-weight',
++    'opacity',
++    'display',
++    'visibility',
++];
++
++/** 코드 화면(블록 SVG)을 잘라서 하나의 SVG 문자열로. 지금 선택된 오브젝트의 코드가 대상 */
++function codeSvg(): string | undefined {
++    try {
++        const workspace = entry().getMainWS && entry().getMainWS();
++        const board = workspace && (workspace.board || (workspace.getBoard && workspace.getBoard()));
++        const group: SVGGraphicsElement | undefined = board && (board.svgBlockGroup || board.svgGroup);
++        if (!group || !group.firstChild || !group.getBBox) {
++            return undefined;
++        }
++        const box = group.getBBox();
++        if (!box || !box.width || !box.height) {
++            return undefined;
++        }
++        const clone = group.cloneNode(true) as SVGGraphicsElement;
++        const originals = group.querySelectorAll('*');
++        const copies = clone.querySelectorAll('*');
++        for (let i = 0; i < originals.length && i < copies.length; i += 1) {
++            const computed = getComputedStyle(originals[i]);
++            const target = copies[i] as unknown as HTMLElement;
++            COPY_STYLES.forEach((name) => {
++                const value = computed.getPropertyValue(name);
++                if (value && target.style) {
++                    target.style.setProperty(name, value);
++                }
++            });
++        }
++        clone.removeAttribute('transform');
++        const pad = 8;
++        const width = Math.ceil(box.width + pad * 2);
++        const height = Math.ceil(box.height + pad * 2);
++        return (
++            `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
++            `viewBox="${box.x - pad} ${box.y - pad} ${width} ${height}" width="${width}" height="${height}">` +
++            new XMLSerializer().serializeToString(clone) +
++            '</svg>'
++        );
++    } catch (e) {
++        console.warn('code capture failed', e);
++        return undefined;
++    }
++}
++
++interface PrintObject {
++    name: string;
++    thumb?: string;
++    x: string;
++    y: string;
++    size: string;
++    rotation: string;
++    direction: string;
++    code?: string;
++}
++
++interface PrintScene {
++    name: string;
++    image?: string;
++    objects: PrintObject[];
++}
++
++/** 작품 전체를 읽는다. 장면·오브젝트를 하나씩 선택해 그림을 뜨고, 끝나면 원래 선택으로 되돌린다. */
++async function collect(): Promise<{ projectImage?: string; scenes: PrintScene[] }> {
++    const E = entry();
++    const sceneApi = E.scene;
++    const scenes: any[] = (sceneApi && sceneApi.getScenes && sceneApi.getScenes()) || [];
++    const objects: any[] = (E.container && E.container.getAllObjects && E.container.getAllObjects()) || [];
++    const originalScene = sceneApi && sceneApi.selectedScene;
++    const originalObject = E.playground && E.playground.object;
++
++    const projectImage = stageImage();
++    const result: PrintScene[] = [];
++
++    const readObject = async (object: any): Promise<PrintObject> => {
++        let code: string | undefined;
++        try {
++            E.container.selectObject(object.id, true);
++            await wait(180);
++            code = codeSvg();
++        } catch (e) {
++            console.warn('select object failed', e);
++        }
++        const entity = object.entity || {};
++        const get = (fn: string, fallback = 0) => (entity[fn] ? entity[fn]() : fallback);
++        return {
++            name: object.name || '',
++            thumb: objectThumb(object),
++            x: trimmed(get('getX')),
++            y: trimmed(get('getY')),
++            size: num(get('getSize', 100), 1),
++            rotation: `${num(get('getRotation'))}°`,
++            direction: `${num(get('getDirection', 90))}°`,
++            code,
++        };
++    };
++
++    if (scenes.length === 0) {
++        const list: PrintObject[] = [];
++        for (const object of objects) {
++            list.push(await readObject(object));
++        }
++        result.push({ name: '장면 1', image: projectImage, objects: list });
++    } else {
++        for (const scene of scenes) {
++            try {
++                if (sceneApi.selectedScene !== scene) {
++                    sceneApi.selectScene(scene);
++                    await wait(350);
++                }
++            } catch (e) {
++                console.warn('select scene failed', e);
++            }
++            const image = stageImage();
++            const list: PrintObject[] = [];
++            for (const object of objects.filter((o) => o.scene && o.scene.id === scene.id)) {
++                list.push(await readObject(object));
++            }
++            result.push({ name: scene.name || '장면', image, objects: list });
++        }
++    }
++
++    try {
++        if (originalScene && sceneApi.selectedScene !== originalScene) {
++            sceneApi.selectScene(originalScene);
++            await wait(200);
++        }
++        if (originalObject) {
++            E.container.selectObject(originalObject.id, true);
++        }
++    } catch (e) {
++        console.warn('restore selection failed', e);
++    }
++    return { projectImage, scenes: result };
++}
++
++const PRINT_ICON =
++    '<svg viewBox="0 0 36 36"><path d="M6 2.4A2.4 2.4 0 0 1 8.4 0H27.6A2.4 2.4 0 0 1 30 2.4V7.54A2.4 2.4 0 0 1 27.6 9.94H8.4A2.4 2.4 0 0 1 6 7.54ZM4 12H32A4 4 0 0 1 36 16V22.94A3 3 0 0 1 33 25.94H29.88V22A4 4 0 0 0 25.88 18H10.12A4 4 0 0 0 6.12 22V25.94H3A3 3 0 0 1 0 22.94V16A4 4 0 0 1 4 12ZM7.9 23.64A3.7 3.7 0 0 1 11.6 19.94H24.4A3.7 3.7 0 0 1 28.1 23.64V32.24A3.7 3.7 0 0 1 24.4 35.94H11.6A3.7 3.7 0 0 1 7.9 32.24Z"/></svg>';
++
++const STYLE = `
++#${OVERLAY_ID}{position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483000;background:#fff;overflow:auto;font-family:'NanumGothic','Nanum Gothic',sans-serif;color:#222;-webkit-overflow-scrolling:touch}
++#${OVERLAY_ID} .elp-bar{position:sticky;top:0;z-index:2;display:flex;align-items:center;height:52px;padding:0 20px;background:#4f80ff;color:#fff}
++#${OVERLAY_ID} .elp-bar .elp-dot{width:5px;height:5px;border-radius:50%;background:#fff;margin-right:14px}
++#${OVERLAY_ID} .elp-bar .elp-title{flex:1;font-size:22px;font-weight:bold}
++#${OVERLAY_ID} .elp-bar button{display:inline-flex;align-items:center;justify-content:center;border:0;cursor:pointer;margin-left:12px}
++#${OVERLAY_ID} .elp-print{width:38px;height:38px;border-radius:50%;background:#fff}
++#${OVERLAY_ID} .elp-print svg{width:19px;height:19px;fill:#4f80ff}
++#${OVERLAY_ID} .elp-close{height:34px;padding:0 14px;border-radius:17px;background:rgba(255,255,255,.2);color:#fff;font-size:15px}
++#${OVERLAY_ID} .elp-page{padding:24px 40px 60px;max-width:1100px}
++#${OVERLAY_ID} h1{font-size:26px;margin:12px 0 14px}
++#${OVERLAY_ID} h2{font-size:21px;margin:30px 0 12px}
++#${OVERLAY_ID} h2:before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:#4f80ff;margin-right:12px;vertical-align:top}
++#${OVERLAY_ID} .elp-stage{border:1px solid #cdeee8;background:#fff;display:flex;align-items:center;justify-content:center}
++#${OVERLAY_ID} .elp-stage.big{width:100%;max-width:960px;aspect-ratio:16/9}
++#${OVERLAY_ID} .elp-stage.small{width:70%;max-width:700px;aspect-ratio:16/9}
++#${OVERLAY_ID} .elp-stage img{max-width:100%;max-height:100%;display:block}
++#${OVERLAY_ID} .elp-note{color:#888;font-size:14px}
++#${OVERLAY_ID} hr{border:0;border-top:2px solid #d5e6f3;margin:34px 0 0}
++#${OVERLAY_ID} .elp-table{margin-top:26px;border:1px solid #b9d3e8;border-radius:22px;overflow:hidden}
++#${OVERLAY_ID} .elp-row{display:grid;grid-template-columns:22% 24% 54%;border-top:1px solid #b9d3e8;break-inside:avoid;page-break-inside:avoid}
++#${OVERLAY_ID} .elp-row.head{background:#d6e6f4;border-top:0;font-weight:bold;text-align:center;font-size:17px}
++#${OVERLAY_ID} .elp-row.head div{padding:16px 6px}
++#${OVERLAY_ID} .elp-cell{padding:18px 14px;border-left:1px solid #b9d3e8;min-width:0}
++#${OVERLAY_ID} .elp-cell:first-child{border-left:0;text-align:center}
++#${OVERLAY_ID} .elp-thumb{display:inline-block;width:110px;border:1px solid #d5e6f3;border-radius:10px;overflow:hidden;background:#fff}
++#${OVERLAY_ID} .elp-thumb .img{height:90px;display:flex;align-items:center;justify-content:center}
++#${OVERLAY_ID} .elp-thumb img{max-width:90%;max-height:85px}
++#${OVERLAY_ID} .elp-thumb .name{background:#d6e6f4;font-size:13px;padding:6px 4px;word-break:break-all}
++#${OVERLAY_ID} .elp-prop{display:flex;font-size:15px;line-height:2.1}
++#${OVERLAY_ID} .elp-prop b{width:52%}
++#${OVERLAY_ID} .elp-code svg{max-width:100%;height:auto;display:block}
++@media print{
++  body > *:not(#${OVERLAY_ID}){display:none !important}
++  html,body{height:auto !important;overflow:visible !important;background:#fff !important}
++  #${OVERLAY_ID}{position:static !important;overflow:visible !important;height:auto !important}
++  #${OVERLAY_ID} .elp-bar{display:none !important}
++  #${OVERLAY_ID} .elp-page{padding:0;max-width:none}
++  @page{margin:12mm}
++}`;
++
++function ensureStyle() {
++    if (!document.getElementById(STYLE_ID)) {
++        const style = document.createElement('style');
++        style.id = STYLE_ID;
++        style.textContent = STYLE;
++        document.head.appendChild(style);
++    }
++}
++
++async function doPrint(title: string) {
++    const cap = (window as any).Capacitor;
++    const plugin = cap && cap.Plugins && cap.Plugins.EntryAccount;
++    if (cap && cap.isNativePlatform && cap.isNativePlatform() && plugin && plugin.printPage) {
++        try {
++            await plugin.printPage({ title });
++            return;
++        } catch (e) {
++            console.warn('native print failed', e);
++        }
++    }
++    window.print();
++}
++
++function closeOverlay() {
++    const old = document.getElementById(OVERLAY_ID);
++    if (old && old.parentNode) {
++        old.parentNode.removeChild(old);
++    }
++}
++
++function render(title: string, data: { projectImage?: string; scenes: PrintScene[] }) {
++    const stage = (image: string | undefined, cls: string) =>
++        `<div class="elp-stage ${cls}">${image ? `<img src="${image}">` : '<span class="elp-note">무대 그림을 가져오지 못했습니다.</span>'}</div>`;
++
++    const rows = (objects: PrintObject[]) =>
++        objects
++            .map(
++                (o) => `
++<div class="elp-row">
++  <div class="elp-cell"><div class="elp-thumb"><div class="img">${o.thumb ? `<img src="${esc(o.thumb)}">` : ''}</div><div class="name">${esc(o.name)}</div></div></div>
++  <div class="elp-cell">
++    <div class="elp-prop"><b>X</b><span>${esc(o.x)}</span></div>
++    <div class="elp-prop"><b>Y</b><span>${esc(o.y)}</span></div>
++    <div class="elp-prop"><b>크기</b><span>${esc(o.size)}</span></div>
++    <div class="elp-prop"><b>이동 방향(°)</b><span>${esc(o.direction)}</span></div>
++    <div class="elp-prop"><b>방향(°)</b><span>${esc(o.rotation)}</span></div>
++  </div>
++  <div class="elp-cell elp-code">${o.code || '<span class="elp-note">코드를 가져오지 못했습니다. (블록 코딩 화면에서 출력해 주세요)</span>'}</div>
++</div>`
++            )
++            .join('');
++
++    const sections = data.scenes
++        .map(
++            (scene) => `
++<h2>${esc(scene.name)}</h2>
++${stage(scene.image, 'small')}
++<div class="elp-table">
++  <div class="elp-row head"><div>오브젝트</div><div>속성</div><div>코드</div></div>
++  ${rows(scene.objects)}
++</div>`
++        )
++        .join('');
++
++    const overlay = document.getElementById(OVERLAY_ID);
++    if (!overlay) {
++        return;
++    }
++    const page = overlay.querySelector('.elp-page');
++    if (page) {
++        page.innerHTML = `<h1>${esc(title)}</h1>${stage(data.projectImage, 'big')}<hr>${sections}`;
++    }
++}
++
++/** 출력 화면을 열고 작품 내용을 채운다 */
++export async function openPrintView(projectName?: string) {
++    const E = entry();
++    if (!E || !E.container) {
++        return;
++    }
++    if (E.engine && E.engine.isState && E.engine.isState('run')) {
++        try {
++            E.toast.warning('출력하기', '작품 실행을 멈춘 뒤에 출력해 주세요.');
++        } catch (e) {
++            alert('작품 실행을 멈춘 뒤에 출력해 주세요.');
++        }
++        return;
++    }
++    ensureStyle();
++    closeOverlay();
++    const title = projectName || '엔트리 작품';
++    const overlay = document.createElement('div');
++    overlay.id = OVERLAY_ID;
++    overlay.innerHTML =
++        `<div class="elp-bar"><span class="elp-dot"></span><span class="elp-title">출력하기</span>` +
++        `<button class="elp-close" type="button">닫기</button>` +
++        `<button class="elp-print" type="button" title="인쇄">${PRINT_ICON}</button></div>` +
++        `<div class="elp-page"><p class="elp-note">출력 화면을 만드는 중입니다…</p></div>`;
++    document.body.appendChild(overlay);
++    (overlay.querySelector('.elp-close') as HTMLElement).onclick = closeOverlay;
++    (overlay.querySelector('.elp-print') as HTMLElement).onclick = () => {
++        doPrint(title);
++    };
++
++    try {
++        render(title, await collect());
++    } catch (e) {
++        console.error(e);
++        const page = overlay.querySelector('.elp-page');
++        if (page) {
++            page.innerHTML = '<p class="elp-note">출력 화면을 만들지 못했습니다.</p>';
++        }
++    }
++}
+diff --git a/src/renderer/helper/saveDoneAlert.ts b/src/renderer/helper/saveDoneAlert.ts
+new file mode 100644
+index 00000000..962fd318
+--- /dev/null
++++ b/src/renderer/helper/saveDoneAlert.ts
+@@ -0,0 +1,70 @@
++/**
++ * [entry-local] 엔트리 계정 저장 완료 창 — 웹판 엔트리의 저장 완료 창과 같은 모양·동작
++ *   머리띠 "저장" + "작품을 마이 페이지에 저장했습니다." + [작품 공유하기] [확인]
++ * 웹판처럼 [작품 공유하기]는 공유할 수 있는 계정(이메일 인증 · 학생 계정 아님)일 때만 보인다.
++ * 결과: 'share' | 'ok'
++ */
++const OVERLAY_ID = 'entry-local-save-done';
++const STYLE_ID = 'entry-local-save-done-style';
++
++const CSS = `
++#${OVERLAY_ID}{position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);font-family:inherit}
++#${OVERLAY_ID} .esd-box{width:388px;max-width:calc(100vw - 32px);background:#fff;border-radius:6px;overflow:hidden;box-shadow:0 6px 24px rgba(0,0,0,.25)}
++#${OVERLAY_ID} .esd-head{position:relative;display:flex;align-items:center;height:54px;padding:0 26px;background:#4f80ff;color:#fff;font-size:20px;font-weight:bold}
++#${OVERLAY_ID} .esd-close{position:absolute;top:50%;right:26px;width:26px;height:26px;margin-top:-13px;padding:0;border:0;background:none;cursor:pointer}
++#${OVERLAY_ID} .esd-close:before,#${OVERLAY_ID} .esd-close:after{content:"";position:absolute;top:50%;left:50%;width:24px;height:3px;margin:-1.5px 0 0 -12px;background:#fff;border-radius:2px}
++#${OVERLAY_ID} .esd-close:before{transform:rotate(45deg)}
++#${OVERLAY_ID} .esd-close:after{transform:rotate(-45deg)}
++#${OVERLAY_ID} .esd-body{padding:40px 24px 38px;text-align:center}
++#${OVERLAY_ID} .esd-msg{margin:0 0 36px;color:#333;font-size:17px;font-weight:bold;line-height:1.4}
++#${OVERLAY_ID} .esd-buttons{display:flex;justify-content:center;gap:10px}
++#${OVERLAY_ID} .esd-buttons button{width:146px;height:48px;border-radius:4px;font:inherit;font-size:15px;font-weight:bold;cursor:pointer}
++#${OVERLAY_ID} .esd-share{border:1px solid #4f80ff;background:#fff;color:#4f80ff}
++#${OVERLAY_ID} .esd-ok{border:1px solid #4f80ff;background:#4f80ff;color:#fff}
++#${OVERLAY_ID} .esd-ok:active{background:#3f6fe8}
++`;
++
++function ensureStyle() {
++    if (!document.getElementById(STYLE_ID)) {
++        const style = document.createElement('style');
++        style.id = STYLE_ID;
++        style.textContent = CSS;
++        document.head.appendChild(style);
++    }
++}
++
++export function showSaveDoneAlert(options: { canShare: boolean }): Promise<'share' | 'ok'> {
++    ensureStyle();
++    document.getElementById(OVERLAY_ID)?.remove();
++    return new Promise((resolve) => {
++        const overlay = document.createElement('div');
++        overlay.id = OVERLAY_ID;
++        overlay.innerHTML =
++            '<div class="esd-box" role="alertdialog" aria-modal="true" aria-label="저장">' +
++            '<div class="esd-head">저장<button class="esd-close" type="button" aria-label="닫기"></button></div>' +
++            '<div class="esd-body"><p class="esd-msg">작품을 마이 페이지에 저장했습니다.</p>' +
++            '<div class="esd-buttons">' +
++            (options.canShare ? '<button class="esd-share" type="button">작품 공유하기</button>' : '') +
++            '<button class="esd-ok" type="button">확인</button></div></div></div>';
++        const close = (result: 'share' | 'ok') => {
++            document.removeEventListener('keydown', onKey, true);
++            overlay.remove();
++            resolve(result);
++        };
++        const onKey = (e: KeyboardEvent) => {
++            if (e.key === 'Escape' || e.key === 'Enter') {
++                e.stopPropagation();
++                close('ok');
++            }
++        };
++        (overlay.querySelector('.esd-close') as HTMLElement).onclick = () => close('ok');
++        (overlay.querySelector('.esd-ok') as HTMLElement).onclick = () => close('ok');
++        const share = overlay.querySelector('.esd-share') as HTMLElement | null;
++        if (share) {
++            share.onclick = () => close('share');
++        }
++        document.addEventListener('keydown', onKey, true);
++        document.body.appendChild(overlay);
++        (overlay.querySelector('.esd-ok') as HTMLElement).focus();
 +    });
 +}
 diff --git a/src/renderer/renderEntry.tsx b/src/renderer/renderEntry.tsx
@@ -14267,17 +14848,18 @@ index 00000000..fe27e100
 +}
 diff --git a/src/web/entryAccountWeb.ts b/src/web/entryAccountWeb.ts
 new file mode 100644
-index 00000000..432d84af
+index 00000000..b64e6f30
 --- /dev/null
 +++ b/src/web/entryAccountWeb.ts
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,198 @@
 +import { registerPlugin } from '@capacitor/core';
 +import {
 +    EntryStatus,
 +    EntryUser,
 +    ENTRY_HOME_URL,
 +    ENTRY_ORIGIN,
-+    autoSaveProbeScript,
++    autoImportScript,
++    SHARE_SCRIPT,
 +    entryProfileUrl,
 +    entryWorkspaceUrl,
 +    exportProjectScript,
@@ -14305,10 +14887,10 @@ index 00000000..432d84af
 +        fileName: string;
 +        help: string;
 +        projectId?: string;
-+        probe?: string;
-+        probeMenu?: string;
++        importScript?: string;
 +        texts?: { [key: string]: string };
 +    }): Promise<{ projectId?: string; saved?: boolean; failed?: boolean }>;
++    share(options: { url: string; script: string }): Promise<{ shared?: boolean }>;
 +}
 +
 +const EntryAccount = registerPlugin<EntryAccountPlugin>('EntryAccount');
@@ -14447,13 +15029,12 @@ index 00000000..432d84af
 +        bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
 +    }
 +    const res = await EntryAccount.openWorkspace({
-+        url: entryWorkspaceUrl(options.entryProjectId),
++        url: entryWorkspaceUrl(), // 오프라인 작품 불러오기는 계정에 새 작품을 만든다
 +        ent: btoa(bin),
 +        fileName: 'entry-local-project.ent', // 영문 이름 (작품 이름은 .ent 안에 들어 있음)
 +        help: SAVING_TEXT,
 +        projectId: options.entryProjectId,
-+        probe: autoSaveProbeScript(false),
-+        probeMenu: autoSaveProbeScript(true),
++        importScript: autoImportScript(btoa(bin)),
 +        texts: SAVE_TEXTS,
 +    });
 +    return {
@@ -14461,6 +15042,13 @@ index 00000000..432d84af
 +        saved: !!(res && res.saved),
 +        failed: !!(res && res.failed),
 +    };
++}
++
++/** [작품 공유하기] — 엔트리 작업 화면에서 엔트리 자체의 '작품 공유하기' 패널을 연다 */
++export async function entryShare(projectId: string) {
++    requireUser();
++    const res = await EntryAccount.share({ url: entryWorkspaceUrl(projectId), script: SHARE_SCRIPT });
++    return { shared: !!(res && res.shared) };
 +}
 diff --git a/src/web/media.ts b/src/web/media.ts
 new file mode 100644
@@ -15532,10 +16120,10 @@ index 00000000..9bd437ca
 +}
 diff --git a/src/web/webMain.ts b/src/web/webMain.ts
 new file mode 100644
-index 00000000..38fb43e6
+index 00000000..26ca18d7
 --- /dev/null
 +++ b/src/web/webMain.ts
-@@ -0,0 +1,964 @@
+@@ -0,0 +1,966 @@
 +import XLSX from 'xlsx';
 +import { vfs, join, basename, extname, normalize } from './vfs';
 +import { packTarGz, unpackTarGz, TarEntry } from './tar';
@@ -15564,6 +16152,7 @@ index 00000000..38fb43e6
 +    entryListProjects,
 +    entryDownloadProject,
 +    entrySaveViaSite,
++    entryShare,
 +} from './entryAccountWeb';
 +import {
 +    PICK,
@@ -16468,6 +17057,7 @@ index 00000000..38fb43e6
 +            delete project.cloudFileId;
 +            return project;
 +        }),
++    'entry:share': (projectId: string) => entryShare(projectId),
 +    'entry:saveViaSite': async (project: any, options: { entryProjectId?: string; name: string }) =>
 +        entrySaveViaSite(await serialize(() => packProject(project)), options),
 +});
@@ -16639,76 +17229,3 @@ index 00000000..635dee76
 +    performance: { hints: false },
 +    plugins: [new CleanWebpackPlugin(), new ExtractTextPlugin('bundle.css')],
 +};
-diff --git a/src/renderer/helper/loginAlert.ts b/src/renderer/helper/loginAlert.ts
-new file mode 100644
-index 00000000..7d1e3a5c
---- /dev/null
-+++ b/src/renderer/helper/loginAlert.ts
-@@ -0,0 +1,67 @@
-+/**
-+ * [entry-local] "로그인 후 이용할 수 있습니다." 알림창
-+ * 웹판 엔트리(playentry.org)의 알림창과 같은 모양: 파란 머리띠(알림 · 닫기) + 안내 문구 + 로그인 버튼
-+ */
-+const OVERLAY_ID = 'entry-local-login-alert';
-+const STYLE_ID = 'entry-local-login-alert-style';
-+
-+const CSS = `
-+#${OVERLAY_ID}{position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);font-family:inherit}
-+#${OVERLAY_ID} .ela-box{width:400px;max-width:calc(100vw - 32px);background:#fff;border-radius:6px;overflow:hidden;box-shadow:0 6px 24px rgba(0,0,0,.25)}
-+#${OVERLAY_ID} .ela-head{position:relative;display:flex;align-items:center;height:56px;padding:0 26px;background:#4f80ff;color:#fff;font-size:22px;font-weight:bold}
-+#${OVERLAY_ID} .ela-close{position:absolute;top:50%;right:30px;width:26px;height:26px;margin-top:-13px;padding:0;border:0;background:none;cursor:pointer}
-+#${OVERLAY_ID} .ela-close:before,#${OVERLAY_ID} .ela-close:after{content:"";position:absolute;top:50%;left:50%;width:26px;height:3px;margin:-1.5px 0 0 -13px;background:#fff;border-radius:2px}
-+#${OVERLAY_ID} .ela-close:before{transform:rotate(45deg)}
-+#${OVERLAY_ID} .ela-close:after{transform:rotate(-45deg)}
-+#${OVERLAY_ID} .ela-body{padding:36px 24px 36px;text-align:center}
-+#${OVERLAY_ID} .ela-msg{margin:0 0 36px;color:#333;font-size:20px;font-weight:bold;line-height:1.4}
-+#${OVERLAY_ID} .ela-ok{width:152px;height:49px;border:0;border-radius:4px;background:#4f80ff;color:#fff;font-size:19px;font-weight:bold;cursor:pointer}
-+#${OVERLAY_ID} .ela-ok:active{background:#3f6fe8}
-+`;
-+
-+function ensureStyle() {
-+    if (document.getElementById(STYLE_ID)) {
-+        return;
-+    }
-+    const style = document.createElement('style');
-+    style.id = STYLE_ID;
-+    style.textContent = CSS;
-+    document.head.appendChild(style);
-+}
-+
-+export function closeLoginAlert() {
-+    const overlay = document.getElementById(OVERLAY_ID);
-+    if (overlay && overlay.parentElement) {
-+        overlay.parentElement.removeChild(overlay);
-+    }
-+    document.removeEventListener('keydown', onKeyDown, true);
-+}
-+
-+function onKeyDown(event: KeyboardEvent) {
-+    if (event.key === 'Escape') {
-+        closeLoginAlert();
-+    }
-+}
-+
-+/** 알림창을 띄운다. 로그인 버튼을 누르면 창을 닫고 onLogin 을 호출한다. */
-+export function showLoginAlert(onLogin?: () => void, message = '로그인 후 이용할 수 있습니다.') {
-+    ensureStyle();
-+    closeLoginAlert();
-+    const overlay = document.createElement('div');
-+    overlay.id = OVERLAY_ID;
-+    overlay.innerHTML =
-+        '<div class="ela-box" role="alertdialog" aria-modal="true">' +
-+        '<div class="ela-head">알림<button class="ela-close" type="button" aria-label="닫기"></button></div>' +
-+        '<div class="ela-body"><p class="ela-msg"></p><button class="ela-ok" type="button">로그인</button></div>' +
-+        '</div>';
-+    (overlay.querySelector('.ela-msg') as HTMLElement).textContent = message;
-+    (overlay.querySelector('.ela-close') as HTMLElement).onclick = closeLoginAlert;
-+    (overlay.querySelector('.ela-ok') as HTMLElement).onclick = () => {
-+        closeLoginAlert();
-+        if (onLogin) {
-+            onLogin();
-+        }
-+    };
-+    document.body.appendChild(overlay);
-+    document.addEventListener('keydown', onKeyDown, true);
-+}
