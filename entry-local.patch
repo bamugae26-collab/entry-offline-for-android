@@ -11489,7 +11489,7 @@ index 32eb38dd..97c297a8 100644
  
  interface IProps extends IReduxDispatch, IReduxState {}
  
-@@ -34,6 +80,20 @@ class Workspace extends Component<IProps> {
+@@ -34,6 +80,35 @@ class Workspace extends Component<IProps> {
      private isFirstRender = true;
      private isSavingCanvasData = false;
      private isSaveProject = false;
@@ -11505,12 +11505,27 @@ index 32eb38dd..97c297a8 100644
 +        if (persisted && persisted.lang) {
 +            setMainLang(persisted.lang);
 +        }
++        // 자동으로 만든 기본 작품 이름을 기억해 둔다 (언어를 바꿀 때 '기본 이름 그대로인지' 알아보기 위해)
++        const original: any = (RendererUtils as any).getDefaultProjectName;
++        if (original && !original.__entryLocalTracked) {
++            const tracked: any = (...args: any[]) => {
++                const name = original.apply(RendererUtils, args);
++                try {
++                    localStorage.setItem('entryLocalAutoName', name);
++                } catch (e) {
++                    // 저장이 막혀도 무시
++                }
++                return name;
++            };
++            tracked.__entryLocalTracked = true;
++            (RendererUtils as any).getDefaultProjectName = tracked;
++        }
 +        return true;
 +    })();
      private defaultInitOption = {
          type: 'workspace',
          backpackDisable: true,
-@@ -60,7 +120,15 @@ class Workspace extends Component<IProps> {
+@@ -60,7 +135,15 @@ class Workspace extends Component<IProps> {
      };
  
      get initOption() {
@@ -11527,7 +11542,7 @@ index 32eb38dd..97c297a8 100644
      }
  
      constructor(props: Readonly<IProps>) {
-@@ -86,7 +154,10 @@ class Workspace extends Component<IProps> {
+@@ -86,7 +169,10 @@ class Workspace extends Component<IProps> {
      }
  
      componentDidMount() {
@@ -11539,7 +11554,7 @@ index 32eb38dd..97c297a8 100644
          setTimeout(async () => {
              await this._waitFontLoad();
              try {
-@@ -108,6 +179,105 @@ class Workspace extends Component<IProps> {
+@@ -108,6 +194,94 @@ class Workspace extends Component<IProps> {
          }, 0);
      }
  
@@ -11560,17 +11575,6 @@ index 32eb38dd..97c297a8 100644
 +        }
 +    };
 +
-+
-+    // [entry-local] 기본 작품 이름을 만들고 기억해 둔다
-+    autoProjectName = () => {
-+        const name = RendererUtils.getDefaultProjectName();
-+        try {
-+            localStorage.setItem('entryLocalAutoName', name);
-+        } catch (e) {
-+            // 저장이 막혀도 무시
-+        }
-+        return name;
-+    };
 +
 +    // [entry-local] 언어를 바꾸면 기본 이름(작품 이름 · 장면 · 엔트리봇)도 새 언어로 바꾼다. 직접 지은 이름은 건드리지 않는다.
 +    translateDefaultNames = async () => {
@@ -11614,7 +11618,7 @@ index 32eb38dd..97c297a8 100644
 +            const isDefaultName = !!name && (name === autoName || (toKo && /^\d{6}_Project[A-Za-z0-9]*$/.test(name)));
 +            project.name = name;
 +            if (isDefaultName) {
-+                const fresh = this.autoProjectName();
++                const fresh = RendererUtils.getDefaultProjectName();
 +                if (fresh && fresh !== name) {
 +                    project.name = fresh;
 +                    changed = true;
@@ -11645,7 +11649,7 @@ index 32eb38dd..97c297a8 100644
 +        }
          if (
              prevProps.common.projectName &&
-@@ -162,6 +332,14 @@ class Workspace extends Component<IProps> {
+@@ -162,6 +336,14 @@ class Workspace extends Component<IProps> {
          addEventListener('saveAsWorkspace', () => {
              this.handleSaveAction('saveAs');
          });
@@ -11660,7 +11664,7 @@ index 32eb38dd..97c297a8 100644
          addEventListener('saveCanvasImage', (data: any) => {
              this.handleCanvasImageSave(data);
          });
-@@ -373,6 +551,10 @@ class Workspace extends Component<IProps> {
+@@ -373,6 +555,10 @@ class Workspace extends Component<IProps> {
          const project = Entry.exportProject();
          if (project) {
              project.name = this._getProjectName();
@@ -11671,7 +11675,7 @@ index 32eb38dd..97c297a8 100644
              Object.assign(project, option);
              LocalStorageManager.saveProject(project);
          }
-@@ -438,78 +620,437 @@ class Workspace extends Component<IProps> {
+@@ -438,78 +624,437 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -12161,7 +12165,7 @@ index 32eb38dd..97c297a8 100644
      };
  
      handleFileAction = async (type: string) => {
-@@ -518,6 +1059,10 @@ class Workspace extends Component<IProps> {
+@@ -518,6 +1063,10 @@ class Workspace extends Component<IProps> {
                  await RendererUtils.clearTempProject();
                  await this.loadProject();
              }
@@ -12172,7 +12176,7 @@ index 32eb38dd..97c297a8 100644
          } else if (type === 'open_offline') {
              this._loadProjectFromFile(
                  () =>
-@@ -576,11 +1121,33 @@ class Workspace extends Component<IProps> {
+@@ -576,11 +1125,33 @@ class Workspace extends Component<IProps> {
          let projectWorkspaceMode = currentWorkspaceMode;
  
          if (project) {
@@ -12197,8 +12201,7 @@ index 32eb38dd..97c297a8 100644
              this.projectSavedPath = project.savedPath || '';
              this.projectParent = project.parent;
              projectWorkspaceMode = project.isPracticalCourse ? 'practical_course' : 'workspace';
--            CommonActions.changeProjectName(project.name || RendererUtils.getDefaultProjectName());
-+            CommonActions.changeProjectName(project.name || this.autoProjectName());
+             CommonActions.changeProjectName(project.name || RendererUtils.getDefaultProjectName());
          } else {
 +            delete this.localProjectId;
 +            delete this.cloudFileId;
@@ -12206,9 +12209,8 @@ index 32eb38dd..97c297a8 100644
 +            this.saveTarget = 'local';
              delete this.projectSavedPath;
              delete this.projectParent;
--            CommonActions.changeProjectName(RendererUtils.getDefaultProjectName());
-+            CommonActions.changeProjectName(this.autoProjectName());
-@@ -602,8 +1169,14 @@ class Workspace extends Component<IProps> {
+             CommonActions.changeProjectName(RendererUtils.getDefaultProjectName());
+@@ -602,8 +1173,14 @@ class Workspace extends Component<IProps> {
          }
          Entry.reloadBlock();
          this.isFirstRender = false;
@@ -12223,7 +12225,7 @@ index 32eb38dd..97c297a8 100644
          try {
              if (project) {
                  await Entry.loadExternalModules(project);
-@@ -633,9 +1206,38 @@ class Workspace extends Component<IProps> {
+@@ -633,9 +1210,38 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -12262,7 +12264,7 @@ index 32eb38dd..97c297a8 100644
          await this.loadProject(project);
      };
  
-@@ -717,6 +1319,8 @@ class Workspace extends Component<IProps> {
+@@ -717,6 +1323,8 @@ class Workspace extends Component<IProps> {
                          onFileAction={this.handleFileAction}
                          onReloadProject={this.reloadProject}
                          onLoadProject={this.loadProject}
