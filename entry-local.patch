@@ -5195,7 +5195,7 @@ index 00000000..ee4ba41c
 \ No newline at end of file
 diff --git a/mobile/capacitor.config.json b/mobile/capacitor.config.json
 new file mode 100644
-index 00000000..79dbde61
+index 00000000..0dd92867
 --- /dev/null
 +++ b/mobile/capacitor.config.json
 @@ -0,0 +1,20 @@
@@ -5205,7 +5205,7 @@ index 00000000..79dbde61
 +  "webDir": "www",
 +  "android": {
 +    "allowMixedContent": false,
-+    "captureInput": true,
++    "captureInput": false,
 +    "webContentsDebuggingEnabled": false
 +  },
 +  "plugins": {
@@ -8680,10 +8680,10 @@ index 00000000..86986717
 +}
 diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
 new file mode 100644
-index 00000000..f2edae79
+index 00000000..44983cc6
 --- /dev/null
 +++ b/src/common/buildInfo.ts
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,22 @@
 +/**
 + * [entry-local] 앱 정보 — 앱 정보 창(? 메뉴 → 앱 정보)과 내 작품 창 아래에 표시된다.
 + *
@@ -8692,16 +8692,19 @@ index 00000000..f2edae79
 + *   - ENTRY_LOCAL_BUILD: 같은 버전 안에서 어떤 패치로 빌드됐는지 구별하는 날짜 번호
 + */
 +export const APP_VERSION = '1.0.0';
-+export const ENTRY_LOCAL_BUILD = '2026.10.23-d'; // 로그인 선택 창 구글 로고
++export const ENTRY_LOCAL_BUILD = '2026.10.23-h'; // 소리 조정 슬라이더 터치
 +
 +/** 앱 이름 (안드로이드 / Windows) */
 +export const APP_NAME_ANDROID = 'Entry for Android';
 +export const APP_NAME_WINDOWS = '엔트리 로컬 (Entry Local)';
++export const APP_NAME_WINDOWS_EN = 'Entry Local'; // 영어 화면
 +
 +/** 개발자 (앱 정보 창과 저작권 줄에 쓰인다) */
 +export const APP_DEVELOPER = '머류 (feat. Claude)';
++export const APP_DEVELOPER_EN = 'Meoryu (feat. Claude)'; // 영어 화면 (닉네임 로마자 표기)
 +/** 저작권자 (개인) — 저작권 줄에는 사람 이름만 쓴다 */
 +export const COPYRIGHT_HOLDER = '머류';
++export const COPYRIGHT_HOLDER_EN = 'Meoryu'; // 영어 화면
 +export const COPYRIGHT_YEAR = '2026';
 diff --git a/src/common/driveClient.ts b/src/common/driveClient.ts
 new file mode 100644
@@ -9495,6 +9498,108 @@ index 00000000..ab770d07
 +export function lt(ko: string, en: string): string {
 +    return currentLang() === 'en' ? en : ko;
 +}
+diff --git a/src/main/backpackStore.ts b/src/main/backpackStore.ts
+new file mode 100644
+index 00000000..f34724f9
+--- /dev/null
++++ b/src/main/backpackStore.ts
+@@ -0,0 +1,96 @@
++/**
++ * [entry-local] 나의 보관함 (백팩) — 이 기기에 저장 (Windows)
++ * 웹판 엔트리는 서버(/rest/backpack)에 저장한다. 여기서는 앱 저장소(userData/backpack)에 저장한다.
++ *   index.json           : [{ _id, type, title, imgPath, created }]  (imgPath = 작은 미리보기 data URL)
++ *   <id>.json            : 블록 { script, variables, messages, functions, tables, ... }
++ *   <id>.eo              : 오브젝트 (오브젝트 내보내기와 같은 형식 — 모양·소리 파일 포함)
++ * 꺼낼 때 오브젝트는 '오브젝트 가져오기'와 같은 방법으로 모양·소리를 지금 작품에 복사한다.
++ */
++import { app, ipcMain } from 'electron';
++import path from 'path';
++import fs from 'fs-extra';
++import crypto from 'crypto';
++import MainUtils from './mainUtils';
++
++type BackpackMeta = { _id: string; type: 'block' | 'object'; title: string; imgPath?: string; created: number };
++
++const dir = () => path.join(app.getPath('userData'), 'backpack');
++const indexPath = () => path.join(dir(), 'index.json');
++
++let queue: Promise<unknown> = Promise.resolve();
++function enqueue<T>(job: () => Promise<T>): Promise<T> {
++    const next = queue.then(job, job);
++    queue = next.catch(() => undefined);
++    return next;
++}
++
++async function readIndex(): Promise<BackpackMeta[]> {
++    try {
++        const list = await fs.readJson(indexPath());
++        return Array.isArray(list) ? list : [];
++    } catch (e) {
++        return [];
++    }
++}
++
++async function writeIndex(list: BackpackMeta[]) {
++    await fs.ensureDir(dir());
++    const tmp = `${indexPath()}.tmp`;
++    await fs.writeJson(tmp, list);
++    await fs.move(tmp, indexPath(), { overwrite: true });
++}
++
++const fileOf = (id: string, type: string) => path.join(dir(), `${id.replace(/[^a-z0-9]/gi, '')}.${type === 'object' ? 'eo' : 'json'}`);
++
++ipcMain.handle('backpack:list', () => enqueue(readIndex));
++
++ipcMain.handle('backpack:add', (event, meta: { type: 'block' | 'object'; title: string; imgPath?: string }, item: any) =>
++    enqueue(async () => {
++        await fs.ensureDir(dir());
++        const id = crypto.randomBytes(12).toString('hex');
++        if (meta.type === 'object') {
++            await MainUtils.exportObject(fileOf(id, 'object'), item);
++        } else {
++            await fs.writeJson(fileOf(id, 'block'), item);
++        }
++        const entry: BackpackMeta = { _id: id, type: meta.type, title: meta.title || '', imgPath: meta.imgPath, created: Date.now() };
++        await writeIndex([entry, ...(await readIndex())]);
++        return entry;
++    })
++);
++
++ipcMain.handle('backpack:get', (event, id: string) =>
++    enqueue(async () => {
++        const meta = (await readIndex()).find((m) => m._id === id);
++        if (!meta) {
++            return undefined;
++        }
++        if (meta.type === 'object') {
++            const [item] = (await MainUtils.importObjects([fileOf(id, 'object')])) as any[];
++            return { type: meta.type, item };
++        }
++        return { type: meta.type, item: await fs.readJson(fileOf(id, 'block')) };
++    })
++);
++
++ipcMain.handle('backpack:rename', (event, id: string, title: string) =>
++    enqueue(async () => {
++        const list = await readIndex();
++        const meta = list.find((m) => m._id === id);
++        if (meta) {
++            meta.title = String(title || '').slice(0, 45);
++            await writeIndex(list);
++        }
++    })
++);
++
++ipcMain.handle('backpack:remove', (event, id: string) =>
++    enqueue(async () => {
++        const list = await readIndex();
++        const meta = list.find((m) => m._id === id);
++        if (meta) {
++            await fs.remove(fileOf(id, meta.type)).catch(() => undefined);
++            await writeIndex(list.filter((m) => m._id !== id));
++        }
++    })
++);
 diff --git a/src/main/cloudDrive.ts b/src/main/cloudDrive.ts
 new file mode 100644
 index 00000000..287dbd28
@@ -10551,14 +10656,15 @@ index dc396cd4..3af6a627 100644
                  resolve(probeData);
              });
 diff --git a/src/main/ipcMainHelper.ts b/src/main/ipcMainHelper.ts
-index 5983999c..ad897155 100644
+index 5983999c..dafee2cd 100644
 --- a/src/main/ipcMainHelper.ts
 +++ b/src/main/ipcMainHelper.ts
-@@ -8,6 +8,9 @@ import checkUpdateRequest from './utils/network/checkUpdate';
+@@ -8,6 +8,10 @@ import checkUpdateRequest from './utils/network/checkUpdate';
  import createLogger from './utils/functions/createLogger';
  import isValidAsarFile, { getPapagoHeaderInfoByValidator } from './utils/functions/isValidAsarFile';
  import fileUtils from './fileUtils';
 +import './localProjectStore'; // [entry-local] 내부 저장소 IPC 등록
++import './backpackStore'; // [entry-local] 나의 보관함 IPC 등록
 +import './cloudDrive'; // [entry-local] 구글 드라이브 연동 IPC 등록
 +import './entryAccount'; // [entry-local] 엔트리 계정 로그인 IPC 등록
  require('@electron/remote/main').initialize();
@@ -11792,7 +11898,7 @@ index e7ca0a84..55078440 100644
              </header>
          );
 diff --git a/src/renderer/components/workspace.tsx b/src/renderer/components/workspace.tsx
-index 32eb38dd..043e2616 100644
+index 32eb38dd..db533523 100644
 --- a/src/renderer/components/workspace.tsx
 +++ b/src/renderer/components/workspace.tsx
 @@ -1,5 +1,5 @@
@@ -11802,7 +11908,7 @@ index 32eb38dd..043e2616 100644
  import './workspace.scss';
  import '../resources/styles/fonts.scss';
  import { connect } from 'react-redux';
-@@ -23,6 +23,55 @@ import { IMapDispatchToProps, IMapStateToProps } from '../store';
+@@ -23,6 +23,58 @@ import { IMapDispatchToProps, IMapStateToProps } from '../store';
  import DragAndDropContainer from './DragAndDropContainer';
  import EntryModalHelper from '../helper/entry/entryModalHelper';
  import ipcRendererHelper from '../helper/ipcRendererHelper';
@@ -11841,6 +11947,9 @@ index 32eb38dd..043e2616 100644
 +import { showSavingAlert } from '../helper/savingAlert';
 +import { promptName } from '../helper/namePrompt';
 +import { startEditorLabels } from '../helper/editorLabels';
++import { installBlockMenuOrder } from '../helper/blockMenuOrder';
++import { installBackpack } from '../helper/backpack';
++import { installTouchSliders } from '../helper/touchSliders';
 +import { lt, setMainLang, currentLang } from '../../common/localLang';
 +
 +/** [entry-local] 알림 (엔트리 화면이 아직 준비 중이면 조용히 넘어간다) */
@@ -11858,7 +11967,7 @@ index 32eb38dd..043e2616 100644
  
  interface IProps extends IReduxDispatch, IReduxState {}
  
-@@ -34,6 +83,35 @@ class Workspace extends Component<IProps> {
+@@ -34,9 +86,38 @@ class Workspace extends Component<IProps> {
      private isFirstRender = true;
      private isSavingCanvasData = false;
      private isSaveProject = false;
@@ -11893,8 +12002,12 @@ index 32eb38dd..043e2616 100644
 +    })();
      private defaultInitOption = {
          type: 'workspace',
-         backpackDisable: true,
-@@ -60,7 +138,15 @@ class Workspace extends Component<IProps> {
+-        backpackDisable: true,
++        backpackDisable: false, // [entry-local] 나의 보관함 (이 기기에 저장)
+         libDir: '../../../node_modules',
+         defaultDir: '../../renderer/resources',
+         entryDir: '/entry-js',
+@@ -60,7 +141,15 @@ class Workspace extends Component<IProps> {
      };
  
      get initOption() {
@@ -11911,7 +12024,7 @@ index 32eb38dd..043e2616 100644
      }
  
      constructor(props: Readonly<IProps>) {
-@@ -86,7 +172,11 @@ class Workspace extends Component<IProps> {
+@@ -86,7 +175,13 @@ class Workspace extends Component<IProps> {
      }
  
      componentDidMount() {
@@ -11920,11 +12033,13 @@ index 32eb38dd..043e2616 100644
 +        // [entry-local] 자동 저장 없음: 사용자가 [저장하기]를 눌렀을 때만 저장한다
 +        startCloudState();
 +        startEditorLabels(); // 모양·소리 편집기 도구 이름을 화면 언어에 맞춤
++        installBlockMenuOrder(); // 블록 오른쪽 메뉴: 복사하기 → 복제하기 → 잘라내기 → 삭제하기
++        installTouchSliders(); // 소리 편집기 크기·빠르기·음높이 슬라이더를 손가락으로도
 +        this.syncMainLang();
          setTimeout(async () => {
              await this._waitFontLoad();
              try {
-@@ -108,7 +198,130 @@ class Workspace extends Component<IProps> {
+@@ -108,7 +203,130 @@ class Workspace extends Component<IProps> {
          }, 0);
      }
  
@@ -12055,16 +12170,19 @@ index 32eb38dd..043e2616 100644
          if (
              prevProps.common.projectName &&
              prevProps.common.projectName !== this.props.common.projectName
-@@ -140,7 +353,7 @@ class Workspace extends Component<IProps> {
+@@ -139,9 +357,8 @@ class Workspace extends Component<IProps> {
+     addEntryEvents() {
          const addEventListener = Entry.addEventListener.bind(Entry);
  
-         addEventListener('openBackPack', () => {
+-        addEventListener('openBackPack', () => {
 -            ModalHelper.getAlertModal(RendererUtils.getLang('[다국어미적용]\n온라인에서 사용가능'));
-+            ModalHelper.getAlertModal(lt('나의 보관함은 온라인 엔트리에서만 쓸 수 있습니다.', 'The backpack is only available in online Entry.'));
-         });
+-        });
++        // [entry-local] 나의 보관함: 웹판과 같은 동작, 이 기기에 저장
++        installBackpack();
          // 교과형에서 하드웨어가 바뀔때 마다 카테고리 변화
          addEventListener('hwChanged', this.handleHardwareChange);
-@@ -162,6 +375,14 @@ class Workspace extends Component<IProps> {
+         // 하드웨어 다운로드 탭에서 다운로드 처리
+@@ -162,6 +379,14 @@ class Workspace extends Component<IProps> {
          addEventListener('saveAsWorkspace', () => {
              this.handleSaveAction('saveAs');
          });
@@ -12079,7 +12197,7 @@ index 32eb38dd..043e2616 100644
          addEventListener('saveCanvasImage', (data: any) => {
              this.handleCanvasImageSave(data);
          });
-@@ -373,6 +594,10 @@ class Workspace extends Component<IProps> {
+@@ -373,6 +598,10 @@ class Workspace extends Component<IProps> {
          const project = Entry.exportProject();
          if (project) {
              project.name = this._getProjectName();
@@ -12090,7 +12208,7 @@ index 32eb38dd..043e2616 100644
              Object.assign(project, option);
              LocalStorageManager.saveProject(project);
          }
-@@ -438,78 +663,486 @@ class Workspace extends Component<IProps> {
+@@ -438,78 +667,486 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -12628,7 +12746,7 @@ index 32eb38dd..043e2616 100644
      };
  
      handleFileAction = async (type: string) => {
-@@ -518,6 +1151,10 @@ class Workspace extends Component<IProps> {
+@@ -518,6 +1155,10 @@ class Workspace extends Component<IProps> {
                  await RendererUtils.clearTempProject();
                  await this.loadProject();
              }
@@ -12639,7 +12757,7 @@ index 32eb38dd..043e2616 100644
          } else if (type === 'open_offline') {
              this._loadProjectFromFile(
                  () =>
-@@ -576,11 +1213,33 @@ class Workspace extends Component<IProps> {
+@@ -576,11 +1217,33 @@ class Workspace extends Component<IProps> {
          let projectWorkspaceMode = currentWorkspaceMode;
  
          if (project) {
@@ -12673,7 +12791,7 @@ index 32eb38dd..043e2616 100644
              delete this.projectSavedPath;
              delete this.projectParent;
              CommonActions.changeProjectName(RendererUtils.getDefaultProjectName());
-@@ -602,8 +1261,14 @@ class Workspace extends Component<IProps> {
+@@ -602,8 +1265,14 @@ class Workspace extends Component<IProps> {
          }
          Entry.reloadBlock();
          this.isFirstRender = false;
@@ -12688,7 +12806,7 @@ index 32eb38dd..043e2616 100644
          try {
              if (project) {
                  await Entry.loadExternalModules(project);
-@@ -633,9 +1298,40 @@ class Workspace extends Component<IProps> {
+@@ -633,9 +1302,40 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -12729,7 +12847,7 @@ index 32eb38dd..043e2616 100644
          await this.loadProject(project);
      };
  
-@@ -717,6 +1413,8 @@ class Workspace extends Component<IProps> {
+@@ -717,6 +1417,8 @@ class Workspace extends Component<IProps> {
                          onFileAction={this.handleFileAction}
                          onReloadProject={this.reloadProject}
                          onLoadProject={this.loadProject}
@@ -12740,10 +12858,10 @@ index 32eb38dd..043e2616 100644
                          executionStatus={executionStatus}
 diff --git a/src/renderer/helper/appInfoAlert.ts b/src/renderer/helper/appInfoAlert.ts
 new file mode 100644
-index 00000000..41fb4879
+index 00000000..58f95039
 --- /dev/null
 +++ b/src/renderer/helper/appInfoAlert.ts
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,146 @@
 +/**
 + * [entry-local] 앱 정보 창 (? 메뉴 → 앱 정보)
 + * 엔트리 알림창과 같은 모양: 파란 머리띠(앱 정보 · 닫기) + 본문 + [확인]
@@ -12752,10 +12870,13 @@ index 00000000..41fb4879
 +import { BRAND_ICON } from './brandIcon';
 +import {
 +    APP_DEVELOPER,
++    APP_DEVELOPER_EN,
 +    APP_NAME_ANDROID,
 +    APP_NAME_WINDOWS,
++    APP_NAME_WINDOWS_EN,
 +    APP_VERSION,
 +    COPYRIGHT_HOLDER,
++    COPYRIGHT_HOLDER_EN,
 +    COPYRIGHT_YEAR,
 +    ENTRY_LOCAL_BUILD,
 +} from '../../common/buildInfo';
@@ -12814,7 +12935,7 @@ index 00000000..41fb4879
 +    ensureStyle();
 +    document.getElementById(OVERLAY_ID)?.remove();
 +    const android = isAndroid();
-+    const appName = android ? APP_NAME_ANDROID : APP_NAME_WINDOWS;
++    const appName = android ? APP_NAME_ANDROID : lt(APP_NAME_WINDOWS, APP_NAME_WINDOWS_EN);
 +    const runtime = android
 +        ? lt('안드로이드 시스템 웹뷰', 'Android System WebView')
 +        : lt('Electron(Chromium)', 'Electron (Chromium)');
@@ -12832,7 +12953,7 @@ index 00000000..41fb4879
 +        '<table>' +
 +        `<tr><th>${esc(lt('앱 이름', 'App name'))}</th><td>${esc(appName)}</td></tr>` +
 +        `<tr><th>${esc(lt('버전', 'Version'))}</th><td>v${esc(APP_VERSION)} <span class="eai-note">(${esc(lt('패치', 'patch'))} ${esc(ENTRY_LOCAL_BUILD)})</span></td></tr>` +
-+        `<tr><th>${esc(lt('개발자', 'Developer'))}</th><td>${esc(APP_DEVELOPER)}</td></tr>` +
++        `<tr><th>${esc(lt('개발자', 'Developer'))}</th><td>${esc(lt(APP_DEVELOPER, APP_DEVELOPER_EN))}</td></tr>` +
 +        '</table>' +
 +        `<h3>[ ${esc(lt('오픈소스 및 저작권 안내', 'Open source & copyright notice'))} ]</h3>` +
 +        `<p>${esc(
@@ -12861,7 +12982,7 @@ index 00000000..41fb4879
 +                'This is not an official app of NAVER Connect Foundation. Entry account features use the official Entry login page, and your password is not stored in this app.'
 +            )
 +        )}</p>` +
-+        `<div class="eai-copy">Copyright ${esc(COPYRIGHT_YEAR)}. ${esc(COPYRIGHT_HOLDER)}. All rights reserved.</div>` +
++        `<div class="eai-copy">Copyright ${esc(COPYRIGHT_YEAR)}. ${esc(lt(COPYRIGHT_HOLDER, COPYRIGHT_HOLDER_EN))}. All rights reserved.</div>` +
 +        '</div>' +
 +        `<div class="eai-buttons"><button class="eai-ok" type="button">${esc(lt('확인', 'OK'))}</button></div>` +
 +        '</div>';
@@ -12886,6 +13007,294 @@ index 00000000..41fb4879
 +    document.addEventListener('keydown', onKey, true);
 +    document.body.appendChild(overlay);
 +    (overlay.querySelector('.eai-ok') as HTMLElement).focus();
++}
+diff --git a/src/renderer/helper/backpack.ts b/src/renderer/helper/backpack.ts
+new file mode 100644
+index 00000000..b711a037
+--- /dev/null
++++ b/src/renderer/helper/backpack.ts
+@@ -0,0 +1,238 @@
++/**
++ * [entry-local] 나의 보관함 (백팩) — 웹판 엔트리와 같은 동작, 저장은 이 기기(앱 저장소)
++ *
++ * 엔트리 코어가 보관함 화면(오른쪽 패널)을 그리고 아래 이벤트를 보낸다. 웹판은 서버(/rest/backpack)에,
++ * 여기서는 앱 저장소(backpack:* IPC)에 저장한다. 웹판 코드(2026-10 확인)와 같은 순서·같은 데이터로 처리한다.
++ *   openBackPack          → 목록 불러와 보관함 열기
++ *   closeBackPack         → 닫기
++ *   addStorage            → (블록·오브젝트를 끌어다 놓거나 오른쪽 메뉴 '나의 보관함에 추가하기') 저장
++ *   removeBackPackItem    → 삭제 (확인 창)
++ *   changeBackPackTitle   → 이름 바꾸기
++ *   addBackPackToEntry    → 보관함 항목을 작업 화면(블록) / 오브젝트 목록(오브젝트)으로 끌어다 놓기
++ */
++import { lt } from '../../common/localLang';
++
++type BackpackItem = { _id: string; type: 'block' | 'object'; title: string; imgPath?: string };
++
++const invoke = <T>(channel: string, ...args: any[]) => (window as any).ipcInvoke(channel, ...args) as Promise<T>;
++const E = () => (window as any).Entry;
++
++/** 미리보기 그림이 없을 때 쓰는 기본 그림 (블록 / 오브젝트) */
++const FALLBACK: { [type: string]: string } = {
++    block:
++        'data:image/svg+xml;charset=utf-8,' +
++        encodeURIComponent(
++            '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60" viewBox="0 0 120 60"><path d="M6 14h22l6 6h10l6-6h64a4 4 0 0 1 4 4v24a4 4 0 0 1-4 4H50l-6 6H34l-6-6H6a4 4 0 0 1-4-4V18a4 4 0 0 1 4-4z" fill="#4f80ff"/><rect x="14" y="27" width="70" height="6" rx="3" fill="#fff" opacity=".85"/></svg>'
++        ),
++    object:
++        'data:image/svg+xml;charset=utf-8,' +
++        encodeURIComponent(
++            '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80"><rect x="8" y="8" width="64" height="64" rx="12" fill="#e9eefb"/><circle cx="40" cy="34" r="12" fill="#4f80ff"/><rect x="22" y="50" width="36" height="10" rx="5" fill="#4f80ff"/></svg>'
++        ),
++};
++
++/** 그림 주소 → 작은 PNG data URL (보관함 목록용, 최대 160px) */
++function toThumbnail(src: string | undefined, max = 160): Promise<string | undefined> {
++    return new Promise((resolve) => {
++        if (!src) {
++            resolve(undefined);
++            return;
++        }
++        const img = new Image();
++        img.crossOrigin = 'anonymous';
++        const timer = setTimeout(() => resolve(undefined), 5000);
++        img.onload = () => {
++            clearTimeout(timer);
++            try {
++                const scale = Math.min(1, max / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
++                const w = Math.max(1, Math.round((img.naturalWidth || max) * scale));
++                const h = Math.max(1, Math.round((img.naturalHeight || max) * scale));
++                const canvas = document.createElement('canvas');
++                canvas.width = w;
++                canvas.height = h;
++                const ctx = canvas.getContext('2d');
++                ctx && ctx.drawImage(img, 0, 0, w, h);
++                resolve(canvas.toDataURL('image/png'));
++            } catch (e) {
++                resolve(undefined);
++            }
++        };
++        img.onerror = () => {
++            clearTimeout(timer);
++            resolve(undefined);
++        };
++        img.src = src;
++    });
++}
++
++/** 웹판 ey(): 블록 목록이 쓰는 변수·리스트·신호·함수·표·확장 블록 */
++function usedData(script: any, index?: number) {
++    const Entry = E();
++    const blocks = script.getBlockList(undefined, undefined, index);
++    const data: any = { ...Entry.variableContainer.getObjectVariables(blocks) };
++    try {
++        data.tables = Entry.playground.dataTable.getTables(blocks);
++    } catch (e) {
++        data.tables = [];
++    }
++    try {
++        data.learning = Entry.aiLearning && Entry.aiLearning.toJSON();
++    } catch (e) {
++        // 인공지능 학습 모델이 없으면 넘어감
++    }
++    try {
++        data.expansionBlocks = Entry.expansion.getExpansions(blocks);
++    } catch (e) {
++        data.expansionBlocks = [];
++    }
++    try {
++        data.aiUtilizeBlocks = Entry.aiUtilize.getAIUtilizes(blocks);
++    } catch (e) {
++        data.aiUtilizeBlocks = [];
++    }
++    return data;
++}
++
++async function showBackPack() {
++    const Entry = E();
++    try {
++        Entry.playground.showBackPack({ isLoading: true });
++        const items = await invoke<BackpackItem[]>('backpack:list');
++        Entry.playground.showBackPack({
++            items: (items || []).map((item) => ({ ...item, imgPath: item.imgPath || FALLBACK[item.type] })),
++            isLoading: false,
++        });
++    } catch (e) {
++        console.error('[backpack] list failed', e);
++        Entry.playground.showBackPack({ items: [], isLoading: false });
++    }
++}
++
++async function addStorage({ type, data, view }: { type: 'block' | 'object'; data: any; view?: any }) {
++    const Entry = E();
++    try {
++        Entry.playground.showBackPack({ isLoading: true });
++        let item: any;
++        let title = '';
++        let imgPath: string | undefined;
++        if (type === 'object') {
++            // 웹판과 같은 데이터: { ...쓰는 변수 등, objects: [오브젝트] }
++            item = { ...usedData(data.script), objects: [data.toJSON()] };
++            item = JSON.parse(JSON.stringify(item));
++            title = data.name;
++            const picture = data.selectedPicture || (data.pictures && data.pictures[0]);
++            imgPath = await toThumbnail(picture && (picture.thumbUrl || picture.fileurl));
++        } else if (type === 'block') {
++            data.data.x = 50;
++            data.data.y = 30;
++            const thread = data.thread;
++            const index = thread.getBlockIndex(data);
++            const blockView = data.view || view;
++            item = { ...usedData(thread, index), script: thread.stringify(undefined, true, index) };
++            item = JSON.parse(JSON.stringify(item));
++            title = (window as any).Lang.Workspace.my_block;
++            try {
++                if (blockView && blockView.getDataUrl) {
++                    const image: any = await blockView.getDataUrl();
++                    const raw = typeof image === 'string' ? image : image && (image.data || image.src);
++                    // 엔트리는 블록 그림을 SVG 글(<svg …>)로 준다 → 그대로 data URL 로 쓴다
++                    imgPath =
++                        typeof raw === 'string' && raw.trim().startsWith('<')
++                            ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(raw)}`
++                            : await toThumbnail(raw, 240);
++                }
++            } catch (e) {
++                imgPath = undefined;
++            }
++        } else {
++            return;
++        }
++        await invoke('backpack:add', { type, title, imgPath }, item);
++    } catch (e) {
++        console.error('[backpack] add failed', e);
++        Entry.modal && Entry.modal.alert
++            ? Entry.modal.alert(lt('나의 보관함에 추가하지 못했습니다.', 'Could not add to My Storage.'))
++            : alert(lt('나의 보관함에 추가하지 못했습니다.', 'Could not add to My Storage.'));
++    } finally {
++        showBackPack();
++    }
++}
++
++async function removeBackPackItem(id: string) {
++    const ok = await (window as any).EntryModal.confirm(
++        lt('나의 보관함에서 삭제할까요?', 'Delete this item from My Storage?'),
++        lt('나의 보관함', 'My Storage')
++    );
++    if (!ok) {
++        return;
++    }
++    try {
++        await invoke('backpack:remove', id);
++    } finally {
++        showBackPack();
++    }
++}
++
++async function changeBackPackTitle(id: string, title: string) {
++    try {
++        await invoke('backpack:rename', id, title);
++    } finally {
++        showBackPack();
++    }
++}
++
++async function addBackPackToEntry(type: 'block' | 'object', id: string) {
++    const Entry = E();
++    if (!id) {
++        return;
++    }
++    try {
++        const found = await invoke<{ type: string; item: any } | undefined>('backpack:get', id);
++        if (!found || !found.item) {
++            return;
++        }
++        if (type === 'block' && found.type === type) {
++            Entry.Utils.addNewBlock(found.item);
++        } else if (found.type === type) {
++            Entry.Utils.addNewObject(found.item);
++        }
++    } catch (e) {
++        console.error('[backpack] get failed', e);
++        Entry.modal && Entry.modal.alert && Entry.modal.alert(lt('보관함 항목을 꺼내지 못했습니다.', 'Could not take the item out of My Storage.'));
++    }
++}
++
++/** 엔트리 이벤트 등록 — Entry.init 이 이벤트를 비우므로 작품을 불러올 때마다 부른다 */
++export function installBackpack() {
++    const Entry = E();
++    if (!Entry || !Entry.addEventListener) {
++        return;
++    }
++    Entry.addEventListener('openBackPack', showBackPack);
++    Entry.addEventListener('closeBackPack', () => Entry.playground && Entry.playground.hideBackPack());
++    Entry.addEventListener('addStorage', addStorage);
++    Entry.addEventListener('removeBackPackItem', removeBackPackItem);
++    Entry.addEventListener('changeBackPackTitle', changeBackPackTitle);
++    Entry.addEventListener('addBackPackToEntry', addBackPackToEntry);
++}
++
++/**
++ * 오른쪽 클릭 메뉴의 '나의 보관함에 추가하기'는 엔트리가 웹 로그인(window.user)일 때만 켠다.
++ * 이 앱은 기기에 저장하므로 로그인 없이 켠다 (블록: 복사할 수 있을 때 / 오브젝트: 실행 중이 아닐 때).
++ */
++export function enableStorageMenuItems(options: any[]) {
++    const Lang: any = (window as any).Lang || {};
++    const label = Lang.Blocks && Lang.Blocks.add_my_storage;
++    if (!label || !Array.isArray(options)) {
++        return options;
++    }
++    const copyItem = options.find((o) => o && Lang.Blocks && o.text === Lang.Blocks.CONTEXT_COPY_option);
++    const running = !!(E() && E().engine && E().engine.isState && E().engine.isState('run'));
++    return options.map((o) => {
++        if (o && o.text === label && !o.enable) {
++            const enable = copyItem ? copyItem.enable !== false : !running;
++            return { ...o, enable };
++        }
++        return o;
++    });
++}
+diff --git a/src/renderer/helper/blockMenuOrder.ts b/src/renderer/helper/blockMenuOrder.ts
+new file mode 100644
+index 00000000..fff99d0e
+--- /dev/null
++++ b/src/renderer/helper/blockMenuOrder.ts
+@@ -0,0 +1,38 @@
++/**
++ * [entry-local] 블록 오른쪽 클릭 메뉴 순서: 코드 복사하기 → 코드 복제하기 → 코드 잘라내기 → 코드 삭제하기
++ * (엔트리는 '복제하기'가 '복사하기'보다 위에 있다 → 메뉴를 띄우기 직전에 두 줄의 순서만 바꾼다)
++ */
++import { enableStorageMenuItems } from './backpack';
++
++let installed = false;
++
++export function installBlockMenuOrder() {
++    const E: any = (window as any).Entry;
++    if (installed || !E || !E.ContextMenu || typeof E.ContextMenu.show !== 'function') {
++        return;
++    }
++    installed = true;
++    const show = E.ContextMenu.show;
++    E.ContextMenu.show = function (options: any[], ...rest: any[]) {
++        try {
++            const L: any = (window as any).Lang || {};
++            const B = L.Blocks || {};
++            if (Array.isArray(options)) {
++                const dup = options.findIndex((o) => o && o.text === B.Duplication_option);
++                const copy = options.findIndex((o) => o && o.text === B.CONTEXT_COPY_option);
++                if (dup >= 0 && copy === dup + 1) {
++                    options = options.slice();
++                    options[dup] = options.splice(copy, 1, options[dup])[0];
++                }
++            }
++        } catch (e) {
++            // 순서를 못 바꿔도 메뉴는 그대로 뜬다
++        }
++        try {
++            options = enableStorageMenuItems(options); // '나의 보관함에 추가하기' 켜기 (로그인 없이 기기에 저장)
++        } catch (e) {
++            // 그대로 둔다
++        }
++        return show.call(this, options, ...rest);
++    };
 +}
 diff --git a/src/renderer/helper/brandIcon.ts b/src/renderer/helper/brandIcon.ts
 new file mode 100644
@@ -13938,6 +14347,61 @@ index 00000000..75a0dbf2
 +    }
 +    location.reload();
 +}
+diff --git a/src/renderer/helper/importToggleHelper.ts b/src/renderer/helper/importToggleHelper.ts
+index a66149f6..22cc0a69 100644
+--- a/src/renderer/helper/importToggleHelper.ts
++++ b/src/renderer/helper/importToggleHelper.ts
+@@ -1,4 +1,42 @@
+ import RendererUtils from './rendererUtils';
++import { LANG_MISSING } from './langSupplement';
++
++/**
++ * [entry-local] 블록 오른쪽 클릭 메뉴 이름 (엔트리 최신 문구와 같게)
++ *   코드 복사하기 · 코드 복제하기 · 코드 잘라내기 · 코드 삭제하기
++ */
++const BLOCK_MENU_TEXT: { [lang: string]: { [key: string]: string } } = {
++    ko: {
++        CONTEXT_COPY_option: '코드 복사하기',
++        Duplication_option: '코드 복제하기',
++        cut_blocks: '코드 잘라내기',
++        Delete_Blocks: '코드 삭제하기',
++    },
++    en: {
++        CONTEXT_COPY_option: 'Copy code',
++        Duplication_option: 'Duplicate code',
++        cut_blocks: 'Cut code',
++        Delete_Blocks: 'Delete code',
++    },
++};
++
++/** 앱 언어 파일에 빠진 엔트리 문구를 채우고(있는 문구는 그대로), 블록 메뉴 이름을 바꾼다 */
++function supplementLang(target: any, lang: string) {
++    if (!target) {
++        return;
++    }
++    const missing = LANG_MISSING[lang] || LANG_MISSING.en;
++    Object.keys(missing).forEach((section) => {
++        target[section] = target[section] || {};
++        Object.keys(missing[section]).forEach((key) => {
++            if (target[section][key] === undefined) {
++                target[section][key] = missing[section][key];
++            }
++        });
++    });
++    target.Blocks = target.Blocks || {};
++    Object.assign(target.Blocks, BLOCK_MENU_TEXT[lang] || BLOCK_MENU_TEXT.en);
++}
+ 
+ export default class {
+     /**
+@@ -29,6 +67,7 @@ export default class {
+      */
+     static async changeLang(lang: string) {
+         window.Lang = require(`../resources/lang/${lang}.json`);
++        supplementLang(window.Lang, lang); // [entry-local] 빠진 엔트리 문구 채우기 · 블록 메뉴 이름
+         window.initNativeMenu();
+     }
+ }
 diff --git a/src/renderer/helper/ipcRendererHelper.ts b/src/renderer/helper/ipcRendererHelper.ts
 index fbdd0052..13ba8c1d 100644
 --- a/src/renderer/helper/ipcRendererHelper.ts
@@ -13982,6 +14446,116 @@ index fbdd0052..13ba8c1d 100644
      static resetDirectory() {
          return ipcInvoke<void>('resetDirectory');
      }
+diff --git a/src/renderer/helper/langSupplement.ts b/src/renderer/helper/langSupplement.ts
+new file mode 100644
+index 00000000..6962b600
+--- /dev/null
++++ b/src/renderer/helper/langSupplement.ts
+@@ -0,0 +1,104 @@
++/**
++ * [entry-local] 엔트리 문구 보충 — 앱의 언어 파일(resources/lang/*.json)은 엔트리 코어보다 오래되어
++ * 코어가 쓰는 문구 일부가 빠져 있다 (예: 블록 오른쪽 메뉴의 '잘라내기'가 빈칸). 빠진 것만 엔트리 공식 문구로 채운다.
++ * 자동 생성: node_modules/entry-js/extern/lang/{ko,en}.js 에서 앱 언어 파일에 없는 키만.
++ */
++export const LANG_MISSING: { [lang: string]: { [section: string]: { [key: string]: string } } } = {
++    ko: {
++        AiLearning: {
++            accuracy: "정확도",
++            f1: "F1",
++            precision: "정밀도",
++            recall: "재현율",
++            train_param_C: "C",
++            train_param_degree: "차수",
++            train_param_gamma: "감마",
++            train_param_kernel_polynomial: "다항식",
++            train_param_kernel_rbf: "RBF",
++            train_param_maxDepth: "트리의 최대 깊이",
++            train_param_minNumSamples: "노드의 최소 데이터 수",
++            train_param_optimizer_adam: "Adam",
++            train_param_optimizer_sgd: "SGD",
++            tree_title: "학습한 트리 창"
++        },
++        Blocks: {
++            ALTINO_REMOTE: "리모콘 수신 값",
++            ALTINO_STVAR: "조향 가변저항",
++            EXPANSION_FESTIVAL_coordinate: "위치",
++            FLOW_repeat_basic_errorMsg: "반복 횟수는 0보다 같거나 커야 합니다.",
++            ROBOT_connect_helper: "로봇 연결 도움말",
++            START_press_some_key_back_slash: "백슬래시",
++            START_press_some_key_back_space: "백스페이스",
++            VARIABLE_list: "리스트",
++            VARIABLE_variable: "변수",
++            dictionary: "사전",
++            hardware_device_name_title_robot: "연결한 로봇:",
++            no_data: "정보없음",
++            no_sentence: "문장이 없습니다",
++            robotis_common_left: "왼쪽",
++            robotis_common_minute: "분",
++            robotis_common_right: "오른쪽",
++            sentence_over_2500_charactor: "2500자까지만 입력할 수 있습니다. ",
++            sentence_over_3000_charactor: "3000자까지만 입력할 수 있습니다.",
++            unknown_sentence: "알 수 없는 문장입니다."
++        },
++        Menus: {
++            cloud: "공유",
++            not_supported_text: "해당 글씨체는 한자를 지원하지 않습니다.",
++            object_import_syntax_error: "불러오려는 오브젝트에 엔트리파이선 문법과 맞지 않는 블록이 포함되어 있습니다. 블록코딩으로 전환한 뒤 오브젝트를 불러와주세요.",
++            realtime: "실시간"
++        },
++        Msgs: {
++            hardware_need_update_title: "업데이트 안내"
++        },
++        Painter: {
++            copy_file: "복사하기",
++            edit: "편집",
++            exit_fullscreen: "전체화면 해제",
++            file: "파일",
++            fullscreen: "전체화면",
++            get_file: "가져오기"
++        },
++        Workspace: {
++            drag_to_remove: "여기로 옮겨 버리기",
++            message_too_long_to_change: "신호의 이름을 10자 이내로 변경해 주세요."
++        },
++        template: {
++            mkboard_lcd_command: "1602 문자 LCD %1 명령실행하기 %2"
++        }
++    },
++    en: {
++        AiLearning: {
++            train_param_error: "If table column information has changed, re-learning is not possible."
++        },
++        Blocks: {
++            START_press_some_key_back_slash: "Backslash",
++            START_press_some_key_back_space: "Backspace",
++            arduino_lite_alert: "Device not found.\nPlease check if firmware\nis installed on device,\nor if PC and device are connected.",
++            english_s: "english",
++            is_type_en: "alphabet",
++            is_type_ko: "hangeul",
++            japan_s: "japanese",
++            korean_s: "korean",
++            robotis_common_left: "Left",
++            robotis_common_minute: "minute(s)",
++            robotis_common_right: "Right",
++            table_median: "median",
++            tts_doggy: "Doggy",
++            tts_kitty: "Kitty",
++            tts_mammon: "Demon",
++            tts_sabina: "Witch"
++        },
++        Menus: {
++            cloud: "Cloud",
++            realtime: "Realtime"
++        },
++        Msgs: {
++            ai_utilize_audio_progress: "Recognizing",
++            hw_connection_failed_desc: "Please make sure that\nthe device used in the project is connected.",
++            hw_connection_failed_title: "Connection Failed",
++            hw_connection_termination_desc: "The device has been disconnected.",
++            hw_connection_termination_title: "Disconnected"
++        }
++    }
++};
 diff --git a/src/renderer/helper/localProjectModal.ts b/src/renderer/helper/localProjectModal.ts
 new file mode 100644
 index 00000000..84fea407
@@ -15624,6 +16198,90 @@ index 00000000..4d961edb
 +            overlay.remove();
 +        },
 +    };
++}
+diff --git a/src/renderer/helper/touchSliders.ts b/src/renderer/helper/touchSliders.ts
+new file mode 100644
+index 00000000..f984798f
+--- /dev/null
++++ b/src/renderer/helper/touchSliders.ts
+@@ -0,0 +1,78 @@
++/**
++ * [entry-local] 소리 편집기 [조정하기]의 크기·빠르기·음높이 슬라이더를 손가락으로도 끌 수 있게 한다.
++ * 엔트리 소리 편집기(vendor/sound-editor.js)의 슬라이더는 마우스 이벤트(mousedown·mousemove·mouseup)만 듣는다.
++ * 태블릿에서 손가락으로 끌면 터치 이벤트만 와서 손잡이가 움직이지 않는다
++ * → 슬라이더 손잡이에서 시작한 터치를 같은 좌표의 마우스 이벤트로 바꿔 보낸다.
++ */
++let installed = false;
++
++function mouse(type: string, touch: Touch, target: EventTarget) {
++    target.dispatchEvent(
++        new MouseEvent(type, {
++            bubbles: true,
++            cancelable: true,
++            view: window,
++            clientX: touch.clientX,
++            clientY: touch.clientY,
++            screenX: touch.screenX,
++            screenY: touch.screenY,
++            button: 0,
++            buttons: type === 'mouseup' ? 0 : 1,
++        })
++    );
++}
++
++export function installTouchSliders() {
++    if (installed || typeof window === 'undefined' || !('ontouchstart' in window || navigator.maxTouchPoints > 0)) {
++        return;
++    }
++    installed = true;
++    let active: { id: number } | null = null;
++
++    document.addEventListener(
++        'touchstart',
++        (e: TouchEvent) => {
++            const target = e.target as Element | null;
++            const knob = target && target.closest && target.closest('#entrySoundEdit [role="slider"]');
++            if (!knob || e.touches.length !== 1) {
++                return;
++            }
++            const touch = e.changedTouches[0];
++            active = { id: touch.identifier };
++            e.preventDefault(); // 화면이 따라 움직이거나 가짜 마우스 이벤트가 두 번 오지 않게
++            mouse('mousedown', touch, knob);
++        },
++        { capture: true, passive: false }
++    );
++
++    document.addEventListener(
++        'touchmove',
++        (e: TouchEvent) => {
++            if (!active) {
++                return;
++            }
++            const touch = Array.from(e.changedTouches).find((t) => t.identifier === active!.id);
++            if (!touch) {
++                return;
++            }
++            e.preventDefault();
++            mouse('mousemove', touch, document);
++        },
++        { capture: true, passive: false }
++    );
++
++    const end = (e: TouchEvent) => {
++        if (!active) {
++            return;
++        }
++        const touch = Array.from(e.changedTouches).find((t) => t.identifier === active!.id);
++        if (!touch) {
++            return;
++        }
++        active = null;
++        e.preventDefault();
++        mouse('mouseup', touch, document);
++    };
++    document.addEventListener('touchend', end, { capture: true, passive: false });
++    document.addEventListener('touchcancel', end, { capture: true, passive: false });
 +}
 diff --git a/src/renderer/renderEntry.tsx b/src/renderer/renderEntry.tsx
 index 87cc6c6d..96586da0 100644
@@ -17284,10 +17942,10 @@ index 00000000..9bd437ca
 +}
 diff --git a/src/web/webMain.ts b/src/web/webMain.ts
 new file mode 100644
-index 00000000..547cf070
+index 00000000..ff7ab218
 --- /dev/null
 +++ b/src/web/webMain.ts
-@@ -0,0 +1,971 @@
+@@ -0,0 +1,1029 @@
 +import { lt } from '../common/localLang';
 +import XLSX from 'xlsx';
 +import { vfs, join, basename, extname, normalize } from './vfs';
@@ -17495,7 +18153,7 @@ index 00000000..547cf070
 +        return readPicked(path);
 +    }
 +    const name = basename(path);
-+    const rel = vfs().relFromUrl(path) || (/^(temp|projects|uploads)\//.test(normalize(path)) ? normalize(path) : '');
++    const rel = vfs().relFromUrl(path) || (/^(temp|projects|uploads|backpack)\//.test(normalize(path)) ? normalize(path) : '');
 +    const bytes = rel ? await vfs().read(rel) : await fetchBytes(path);
 +    return { bytes, name, type: mimeOf(name) };
 +}
@@ -18226,10 +18884,68 @@ index 00000000..547cf070
 +        }),
 +    'entry:share': (projectId: string) => entryShare(projectId),
 +    'entry:cancelSave': () => entryCancelSave(),
++    // [entry-local] 나의 보관함 (앱 저장소 backpack/ 에 저장 — Windows 의 backpackStore.ts 와 같은 형식)
++    'backpack:list': () => serialize(backpackIndex),
++    'backpack:add': (meta: { type: 'block' | 'object'; title: string; imgPath?: string }, item: any) =>
++        serialize(async () => {
++            const id = createFileId();
++            if (meta.type === 'object') {
++                await exportObject(backpackFile(id, 'object'), item);
++            } else {
++                await vfs().write(backpackFile(id, 'block'), JSON.stringify(item));
++            }
++            const entry = { _id: id, type: meta.type, title: meta.title || '', imgPath: meta.imgPath, created: Date.now() };
++            await vfs().write(BACKPACK_INDEX, JSON.stringify([entry, ...(await backpackIndex())]));
++            return entry;
++        }),
++    'backpack:get': (id: string) =>
++        serialize(async () => {
++            const meta = (await backpackIndex()).find((m: any) => m._id === id);
++            if (!meta) {
++                return undefined;
++            }
++            if (meta.type === 'object') {
++                return { type: meta.type, item: await importObject(backpackFile(id, 'object')) };
++            }
++            return { type: meta.type, item: JSON.parse(await vfs().readText(backpackFile(id, 'block'))) };
++        }),
++    'backpack:rename': (id: string, title: string) =>
++        serialize(async () => {
++            const list = await backpackIndex();
++            const meta = list.find((m: any) => m._id === id);
++            if (meta) {
++                meta.title = String(title || '').slice(0, 45);
++                await vfs().write(BACKPACK_INDEX, JSON.stringify(list));
++            }
++        }),
++    'backpack:remove': (id: string) =>
++        serialize(async () => {
++            const list = await backpackIndex();
++            const meta = list.find((m: any) => m._id === id);
++            if (meta) {
++                await vfs().remove(backpackFile(id, meta.type)).catch(() => undefined);
++                await vfs().write(BACKPACK_INDEX, JSON.stringify(list.filter((m: any) => m._id !== id)));
++            }
++        }),
 +    'entryLocal:setLang': (lang: string) => entrySetLang(lang),
 +    'entry:saveViaSite': async (project: any, options: { entryProjectId?: string; name: string }) =>
 +        entrySaveViaSite(await serialize(() => packProject(project)), options),
 +});
++
++/* ---------------- 나의 보관함 ---------------- */
++const BACKPACK_INDEX = 'backpack/index.json';
++const backpackFile = (id: string, type: string) => `backpack/${id.replace(/[^a-z0-9]/gi, '')}.${type === 'object' ? 'eo' : 'json'}`;
++async function backpackIndex(): Promise<any[]> {
++    try {
++        if (!(await vfs().exists(BACKPACK_INDEX))) {
++            return [];
++        }
++        const list = JSON.parse(await vfs().readText(BACKPACK_INDEX));
++        return Array.isArray(list) ? list : [];
++    } catch (e) {
++        return [];
++    }
++}
 +
 +/** Electron IPC 는 인자를 복제해서 넘긴다. 같은 동작을 해야 렌더러 객체가 바뀌지 않는다. */
 +function cloneArg(value: any) {
