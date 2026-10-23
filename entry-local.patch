@@ -8680,7 +8680,7 @@ index 00000000..86986717
 +}
 diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
 new file mode 100644
-index 00000000..44983cc6
+index 00000000..2fc7f8c5
 --- /dev/null
 +++ b/src/common/buildInfo.ts
 @@ -0,0 +1,22 @@
@@ -8692,7 +8692,7 @@ index 00000000..44983cc6
 + *   - ENTRY_LOCAL_BUILD: 같은 버전 안에서 어떤 패치로 빌드됐는지 구별하는 날짜 번호
 + */
 +export const APP_VERSION = '1.0.0';
-+export const ENTRY_LOCAL_BUILD = '2026.10.23-h'; // 소리 조정 슬라이더 터치
++export const ENTRY_LOCAL_BUILD = '2026.10.23-j'; // 교과형(실과) 보라 테마
 +
 +/** 앱 이름 (안드로이드 / Windows) */
 +export const APP_NAME_ANDROID = 'Entry for Android';
@@ -11209,10 +11209,10 @@ index 12e1e85b..bc4f41d7 100644
          },
          {
 diff --git a/src/renderer/components/header.scss b/src/renderer/components/header.scss
-index 0fa6192c..c4aa15ad 100644
+index 0fa6192c..cd5513de 100644
 --- a/src/renderer/components/header.scss
 +++ b/src/renderer/components/header.scss
-@@ -366,3 +366,181 @@
+@@ -366,3 +366,218 @@
  [role='button'] {
      cursor: pointer;
  }
@@ -11382,10 +11382,6 @@ index 0fa6192c..c4aa15ad 100644
 +    font-weight: bold;
 +    line-height: 1;
 +}
-+.practical_course_mode .entry_local_settings_menu {
-+    border-color: #6a5cf0;
-+    background: #7466f7;
-+}
 +/* [entry-local] 기본형 + 성능 구역 — 폭은 내용만큼 */
 +.group_inner.mode_group .work_space.perf_space:first-child {
 +    margin-left: 0 !important;
@@ -11394,8 +11390,49 @@ index 0fa6192c..c4aa15ad 100644
 +    width: auto !important;
 +    min-width: 0 !important;
 +}
++
++/* [entry-local] 교과형(실과) — 웹판 교과형 화면과 같게 (2026-10 웹판 화면에서 색을 그대로 땀) */
++.practical_course_mode {
++    /* 파일·저장·도움말 동그라미: 파란 바탕 + 흰 테두리 */
++    .common_gnb .group_inner .btn_work_space {
++        border: 1px solid #fff;
++        background-color: #6e97ff;
++    }
++    /* 출력 버튼 아이콘 보라 */
++    .common_gnb .group_box .link_workspace_text.btn_print_project svg {
++        fill: #8274ff;
++    }
++    /* 톱니바퀴: 연보라, 메뉴는 진보라 상자 */
++    .btn_entry_local_settings svg {
++        fill: #b4acff;
++    }
++    .btn_entry_local_settings:hover svg,
++    .btn_entry_local_settings.on svg {
++        fill: #dcd8ff;
++    }
++    .entry_local_settings_menu {
++        border-color: #312789;
++        background: #4f40d5;
++    }
++    .entry_local_settings_menu .esm_item + .esm_item {
++        border-top-color: #3b2fb4;
++        box-shadow: inset 0 1px 0 #6556e4;
++    }
++    .entry_local_settings_menu .esm_item:hover {
++        background: #4536c6;
++    }
++    /* 시작하기 버튼 보라 바탕, 오브젝트 추가하기·정지 글씨 보라 */
++    .entryRunButtonWorkspace_w {
++        background-color: #8274ff;
++    }
++    .entryAddButtonWorkspace_w,
++    .entryStopButtonWorkspace_w,
++    .entryPauseButtonWorkspace_w {
++        color: #8274ff;
++    }
++}
 diff --git a/src/renderer/components/header.tsx b/src/renderer/components/header.tsx
-index e7ca0a84..55078440 100644
+index e7ca0a84..c7826b0e 100644
 --- a/src/renderer/components/header.tsx
 +++ b/src/renderer/components/header.tsx
 @@ -12,6 +12,25 @@ import ImportToggleHelper from '../helper/importToggleHelper';
@@ -11433,7 +11470,7 @@ index e7ca0a84..55078440 100644
      programLanguageMode: string;
      executionStatus: {
          canRedo: boolean;
-@@ -44,6 +65,163 @@ type DropDownItemPair = [string | ReactElement, string];
+@@ -44,6 +65,167 @@ type DropDownItemPair = [string | ReactElement, string];
  
  class Header extends Component<IProps, IState> {
      dropdownList: any;
@@ -11494,16 +11531,20 @@ index e7ca0a84..55078440 100644
 +        const { programLanguageMode, persist } = this.props;
 +        const isEn = persist.lang === 'en';
 +        const isPython = programLanguageMode === 'python';
-+        const showMode = persist.mode === 'workspace';
++        // 웹판과 같게: 교과형(실과)은 파이썬·영어가 없어서 [블록 코딩] 한 줄만 보이고 눌러도 바뀌지 않는다
++        const practical = persist.mode === 'practical_course';
 +        const modeText = isPython ? (isEn ? 'Entry Python' : '엔트리파이썬') : isEn ? 'Block Coding' : '블록 코딩';
 +        return (
 +            <div className={'entry_local_settings_menu'} role={'menu'}>
-+                {showMode && (
++                {(
 +                    <button
 +                        type={'button'}
 +                        role={'menuitem'}
 +                        className={`esm_item esm_mode ${isPython ? 'python' : 'block'}`}
 +                        onClick={() => {
++                            if (practical) {
++                                return;
++                            }
 +                            // 웹판처럼 메뉴는 열어 둔 채 그 자리에서 모드만 바꾼다
 +                            const target = isPython ? 'block' : 'python';
 +                            try {
@@ -11536,7 +11577,7 @@ index e7ca0a84..55078440 100644
 +                        <span className={'esm_text'}>{modeText}</span>
 +                    </button>
 +                )}
-+                <button
++                {!practical && <button
 +                    type={'button'}
 +                    role={'menuitem'}
 +                    className={'esm_item esm_lang'}
@@ -11549,7 +11590,7 @@ index e7ca0a84..55078440 100644
 +                        {isEn ? 'A' : '가'}
 +                    </span>
 +                    <span className={'esm_text'}>{isEn ? 'English' : '한국어'}</span>
-+                </button>
++                </button>}
 +            </div>
 +        );
 +    }
@@ -11597,7 +11638,7 @@ index e7ca0a84..55078440 100644
  
      constructor(props: Readonly<IProps>) {
          super(props);
-@@ -63,15 +241,54 @@ class Header extends Component<IProps, IState> {
+@@ -63,15 +245,54 @@ class Header extends Component<IProps, IState> {
      get fileList(): DropDownItemPair[] {
          return [
              [RendererUtils.getLang('Workspace.file_new'), 'new'],
@@ -11656,7 +11697,7 @@ index e7ca0a84..55078440 100644
      }
  
      get helpList(): DropDownItemPair[] {
-@@ -84,6 +301,7 @@ class Header extends Component<IProps, IState> {
+@@ -84,6 +305,7 @@ class Header extends Component<IProps, IState> {
                  ? [RendererUtils.getLang('Workspace.hardware_guide'), 'help_hardware']
                  : [RendererUtils.getLang('Workspace.robot_guide'), 'help_robot'],
              [RendererUtils.getLang('Workspace.python_guide'), 'help_python'],
@@ -11664,7 +11705,7 @@ index e7ca0a84..55078440 100644
          ];
      }
  
-@@ -102,6 +320,17 @@ class Header extends Component<IProps, IState> {
+@@ -102,6 +324,17 @@ class Header extends Component<IProps, IState> {
          ];
      }
  
@@ -11682,7 +11723,7 @@ index e7ca0a84..55078440 100644
      // noti : 가지고 있는 다국어 종류는 4종류이지만, 운영빌드에서는 관리중인 2종류만 제공
      get languageList(): DropDownItemPair[] {
          return [
-@@ -192,6 +421,12 @@ class Header extends Component<IProps, IState> {
+@@ -192,6 +425,12 @@ class Header extends Component<IProps, IState> {
              case 'language':
                  this.handleChangeLanguage(item);
                  break;
@@ -11695,7 +11736,7 @@ index e7ca0a84..55078440 100644
          }
      }
  
-@@ -205,6 +440,10 @@ class Header extends Component<IProps, IState> {
+@@ -205,6 +444,10 @@ class Header extends Component<IProps, IState> {
  
      handleHelpClick(item: DropDownItemPair) {
          const key = item[1];
@@ -11706,7 +11747,7 @@ index e7ca0a84..55078440 100644
          if (key === 'help_block') {
              Entry.dispatchEvent('showBlockHelper');
          } else {
-@@ -277,32 +516,13 @@ class Header extends Component<IProps, IState> {
+@@ -277,32 +520,13 @@ class Header extends Component<IProps, IState> {
                  </div>
                  {!isValidProduct && (
                      <div className="invalidate_check_box">
@@ -11741,7 +11782,7 @@ index e7ca0a84..55078440 100644
                          {
                              // 새로만들기, 불러오기
                              <div className={'work_space'}>
-@@ -393,9 +613,33 @@ class Header extends Component<IProps, IState> {
+@@ -393,9 +617,33 @@ class Header extends Component<IProps, IState> {
                          </div>
                      </div>
  
@@ -11778,7 +11819,7 @@ index e7ca0a84..55078440 100644
                              <div className={'work_space'}>
                                  <a
                                      className={`link_workspace_text text_work_space  ${
-@@ -410,28 +654,105 @@ class Header extends Component<IProps, IState> {
+@@ -410,28 +658,105 @@ class Header extends Component<IProps, IState> {
                                  </a>
                                  {this.makeDropdown('mode', this.modeList)}
                              </div>
@@ -11897,8 +11938,36 @@ index e7ca0a84..55078440 100644
                  </div>
              </header>
          );
+diff --git a/src/renderer/components/index.tsx b/src/renderer/components/index.tsx
+index eb89ad9b..baaa8a44 100644
+--- a/src/renderer/components/index.tsx
++++ b/src/renderer/components/index.tsx
+@@ -1,10 +1,11 @@
+-import React from 'react';
++import React, { useEffect } from 'react';
+ import { connect } from 'react-redux';
+ import Workspace from './workspace';
+ import ModeSelectModal from './modeSelectModal';
+ import './index.scss';
+ import { IStoreState } from '../store/modules';
+ import { IMapStateToProps } from '../store';
++import { setPracticalTheme } from '../helper/practicalTheme';
+ 
+ const Script = ({ children }: { children: any }) => (
+     <script dangerouslySetInnerHTML={{ __html: `(${children.toString()})();` }}/>
+@@ -16,6 +17,10 @@ interface IProps extends IReduxState {
+ 
+ const IndexComponent: React.FC<IProps> = (props) => {
+     const { mode } = props;
++    // [entry-local] 교과형이면 알림창·팝업 등 편집기 바깥 창도 보라색
++    useEffect(() => {
++        setPracticalTheme(mode === 'practical_course');
++    }, [mode]);
+ 
+     return (
+         <div>
 diff --git a/src/renderer/components/workspace.tsx b/src/renderer/components/workspace.tsx
-index 32eb38dd..db533523 100644
+index 32eb38dd..d71c11ac 100644
 --- a/src/renderer/components/workspace.tsx
 +++ b/src/renderer/components/workspace.tsx
 @@ -1,5 +1,5 @@
@@ -12039,7 +12108,7 @@ index 32eb38dd..db533523 100644
          setTimeout(async () => {
              await this._waitFontLoad();
              try {
-@@ -108,7 +203,130 @@ class Workspace extends Component<IProps> {
+@@ -108,7 +203,133 @@ class Workspace extends Component<IProps> {
          }, 0);
      }
  
@@ -12134,7 +12203,10 @@ index 32eb38dd..db533523 100644
 +            } catch (e) {
 +                autoName = '';
 +            }
-+            const isDefaultName = !!name && (name === autoName || (toKo && /^\d{6}_Project[A-Za-z0-9]*$/.test(name)));
++            // 작품 이름은 한 번도 저장하지 않은 새 작품의 자동 이름일 때만 바꾼다 (저장한 작품·불러온 작품은 그대로)
++            const neverSaved = !this.localProjectId && !this.cloudFileId && !this.entryProjectId && !this.projectSavedPath;
++            const isDefaultName =
++                neverSaved && !!name && (name === autoName || (toKo && /^\d{6}_Project[A-Za-z0-9]*$/.test(name)));
 +            project.name = name;
 +            if (isDefaultName) {
 +                const fresh = RendererUtils.getDefaultProjectName();
@@ -12170,7 +12242,7 @@ index 32eb38dd..db533523 100644
          if (
              prevProps.common.projectName &&
              prevProps.common.projectName !== this.props.common.projectName
-@@ -139,9 +357,8 @@ class Workspace extends Component<IProps> {
+@@ -139,9 +360,8 @@ class Workspace extends Component<IProps> {
      addEntryEvents() {
          const addEventListener = Entry.addEventListener.bind(Entry);
  
@@ -12182,7 +12254,7 @@ index 32eb38dd..db533523 100644
          // 교과형에서 하드웨어가 바뀔때 마다 카테고리 변화
          addEventListener('hwChanged', this.handleHardwareChange);
          // 하드웨어 다운로드 탭에서 다운로드 처리
-@@ -162,6 +379,14 @@ class Workspace extends Component<IProps> {
+@@ -162,6 +382,14 @@ class Workspace extends Component<IProps> {
          addEventListener('saveAsWorkspace', () => {
              this.handleSaveAction('saveAs');
          });
@@ -12197,7 +12269,7 @@ index 32eb38dd..db533523 100644
          addEventListener('saveCanvasImage', (data: any) => {
              this.handleCanvasImageSave(data);
          });
-@@ -373,6 +598,10 @@ class Workspace extends Component<IProps> {
+@@ -373,6 +601,10 @@ class Workspace extends Component<IProps> {
          const project = Entry.exportProject();
          if (project) {
              project.name = this._getProjectName();
@@ -12208,7 +12280,7 @@ index 32eb38dd..db533523 100644
              Object.assign(project, option);
              LocalStorageManager.saveProject(project);
          }
-@@ -438,78 +667,486 @@ class Workspace extends Component<IProps> {
+@@ -438,78 +670,486 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -12746,7 +12818,7 @@ index 32eb38dd..db533523 100644
      };
  
      handleFileAction = async (type: string) => {
-@@ -518,6 +1155,10 @@ class Workspace extends Component<IProps> {
+@@ -518,6 +1158,10 @@ class Workspace extends Component<IProps> {
                  await RendererUtils.clearTempProject();
                  await this.loadProject();
              }
@@ -12757,7 +12829,7 @@ index 32eb38dd..db533523 100644
          } else if (type === 'open_offline') {
              this._loadProjectFromFile(
                  () =>
-@@ -576,11 +1217,33 @@ class Workspace extends Component<IProps> {
+@@ -576,11 +1220,33 @@ class Workspace extends Component<IProps> {
          let projectWorkspaceMode = currentWorkspaceMode;
  
          if (project) {
@@ -12791,7 +12863,7 @@ index 32eb38dd..db533523 100644
              delete this.projectSavedPath;
              delete this.projectParent;
              CommonActions.changeProjectName(RendererUtils.getDefaultProjectName());
-@@ -602,8 +1265,14 @@ class Workspace extends Component<IProps> {
+@@ -602,8 +1268,14 @@ class Workspace extends Component<IProps> {
          }
          Entry.reloadBlock();
          this.isFirstRender = false;
@@ -12806,7 +12878,7 @@ index 32eb38dd..db533523 100644
          try {
              if (project) {
                  await Entry.loadExternalModules(project);
-@@ -633,9 +1302,40 @@ class Workspace extends Component<IProps> {
+@@ -633,9 +1305,40 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -12847,7 +12919,7 @@ index 32eb38dd..db533523 100644
          await this.loadProject(project);
      };
  
-@@ -717,6 +1417,8 @@ class Workspace extends Component<IProps> {
+@@ -717,6 +1420,8 @@ class Workspace extends Component<IProps> {
                          onFileAction={this.handleFileAction}
                          onReloadProject={this.reloadProject}
                          onLoadProject={this.loadProject}
@@ -14071,10 +14143,10 @@ index 00000000..af572b2e
 +}
 diff --git a/src/renderer/helper/entry/localMode.ts b/src/renderer/helper/entry/localMode.ts
 new file mode 100644
-index 00000000..b36bcf3c
+index 00000000..ecf02153
 --- /dev/null
 +++ b/src/renderer/helper/entry/localMode.ts
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,96 @@
 +/**
 + * [entry-local] 로컬 전용 동작 모음
 + *
@@ -14135,6 +14207,13 @@ index 00000000..b36bcf3c
 +    style.textContent = `
 +        /* 변수/리스트 만들기: 공유·실시간 선택지 숨김 (항상 일반) */
 +        .entryVariableTypeBoxWrapper { display: none !important; }
++        /* 신호 이름 입력칸: 앱 기본 스타일(input = content-box) 때문에 오른쪽으로 삐져나옴 → 리스트 이름 칸과 같게 */
++        .entryVariableListWorkspace .msdAddSpaceWrapper input[type='text'] {
++            box-sizing: border-box;
++            width: 100%;
++            height: 24px;
++            padding: 6px 8px;
++        }
 +    `;
 +    document.head.appendChild(style);
 +}
@@ -15628,6 +15707,344 @@ index 00000000..6efdee16
 +        input.focus();
 +        input.select();
 +    });
++}
+diff --git a/src/renderer/helper/practicalTheme.ts b/src/renderer/helper/practicalTheme.ts
+new file mode 100644
+index 00000000..34157d7a
+--- /dev/null
++++ b/src/renderer/helper/practicalTheme.ts
+@@ -0,0 +1,332 @@
++/**
++ * [entry-local] 교과형(실과) 보라 테마
++ *
++ * 웹판 엔트리는 교과형일 때 편집기 몇 곳(위쪽 막대·시작하기 버튼·장면 탭 등)을 보라색(#8274ff)으로 바꾼다.
++ * 그런데 알림창·확인창·오브젝트 추가하기 같은 팝업, 이 앱이 만든 창(저장 중·저장 완료·로그인·내 작품·앱 정보 …)은
++ * 편집기(.ws) 바깥(body 바로 아래)에 붙어서 교과형 표시(.practical_course_mode)가 닿지 않아 파란색 그대로였다.
++ *
++ * → 교과형일 때 body 에 el-practical 표시를 달고, 문서에 실린 모든 스타일 규칙 중 엔트리 파란색을 쓰는 규칙을
++ *   보라색으로 바꾼 복사본을 만들어 "편집기 바깥(.ws 밖)" 요소에만 덧씌운다.
++ *   편집기 안(블록 탭 등 웹판에서도 파란 곳)은 건드리지 않는다.
++ *   새 창이 처음 열리면서 스타일을 더하면(head 에 style 추가) 다시 만든다.
++ */
++
++const BODY_CLASS = 'el-practical';
++const STYLE_ID = 'entry-local-practical-theme';
++
++let enabled = false;
++let observer: MutationObserver | undefined;
++let timer: any;
++let lastSignature = '';
++
++/* ---------- 색 변환: 엔트리 파랑 → 실과 보라 ---------- */
++
++function rgbToHsl(r: number, g: number, b: number) {
++    r /= 255;
++    g /= 255;
++    b /= 255;
++    const max = Math.max(r, g, b);
++    const min = Math.min(r, g, b);
++    const l = (max + min) / 2;
++    let h = 0;
++    let s = 0;
++    if (max !== min) {
++        const d = max - min;
++        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
++        if (max === r) {
++            h = (g - b) / d + (g < b ? 6 : 0);
++        } else if (max === g) {
++            h = (b - r) / d + 2;
++        } else {
++            h = (r - g) / d + 4;
++        }
++        h *= 60;
++    }
++    return [h, s * 100, l * 100];
++}
++
++function hslToRgb(h: number, s: number, l: number) {
++    s /= 100;
++    l /= 100;
++    const k = (n: number) => (n + h / 30) % 12;
++    const a = s * Math.min(l, 1 - l);
++    const f = (n: number) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
++    return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
++}
++
++/**
++ * 엔트리 파란 계열(색상 210°~235°, 채도 55% 이상)만 보라로 옮긴다.
++ * #4f80ff(223°, 밝기 65.5%) → #8274ff(246°, 밝기 72.7%) 가 정확히 되도록 색상 +23°, 밝기는 흰색 쪽으로 21% 당긴다.
++ * 엔트리의 회청색(블록 꾸러미 바탕 #ecf8ff, 테두리 #aac5d5 등, 채도 낮음·하늘색)은 그대로 둔다.
++ */
++function mapRgb(r: number, g: number, b: number): [number, number, number] | undefined {
++    const [h, s, l] = rgbToHsl(r, g, b);
++    if (h < 210 || h > 235 || s < 55 || l < 20 || l > 98) {
++        return undefined;
++    }
++    if (r === 0x4f && g === 0x80 && b === 0xff) {
++        return [0x82, 0x74, 0xff];
++    }
++    const nl = l + (100 - l) * 0.21;
++    const [nr, ng, nb] = hslToRgb(h + 23, s, Math.min(nl, 99));
++    return [nr, ng, nb];
++}
++
++const hex2 = (n: number) => n.toString(16).padStart(2, '0');
++
++function convertValue(value: string): string {
++    let changed = value.replace(/#([0-9a-f]{3,8})\b/gi, (m, hex: string) => {
++        let full = hex;
++        if (hex.length === 3 || hex.length === 4) {
++            full = hex
++                .split('')
++                .map((c) => c + c)
++                .join('');
++        }
++        if (full.length !== 6 && full.length !== 8) {
++            return m;
++        }
++        const r = parseInt(full.slice(0, 2), 16);
++        const g = parseInt(full.slice(2, 4), 16);
++        const b = parseInt(full.slice(4, 6), 16);
++        const to = mapRgb(r, g, b);
++        return to ? `#${hex2(to[0])}${hex2(to[1])}${hex2(to[2])}${full.slice(6)}` : m;
++    });
++    changed = changed.replace(/rgba?\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)\s*(?:[,/]\s*([\d.]+%?)\s*)?\)/gi, (m, r, g, b, a) => {
++        const to = mapRgb(+r, +g, +b);
++        if (!to) {
++            return m;
++        }
++        return a !== undefined ? `rgba(${to[0]}, ${to[1]}, ${to[2]}, ${a})` : `rgb(${to[0]}, ${to[1]}, ${to[2]})`;
++    });
++    return changed;
++}
++
++/* ---------- 선택자: 편집기(.ws) 바깥 요소에만 ---------- */
++
++const PSEUDO_ELEMENT = /(::?(?:before|after|placeholder|selection|first-line|first-letter|marker|backdrop|-webkit-[\w-]+|-moz-[\w-]+))+$/i;
++
++function splitSelectors(text: string): string[] {
++    const out: string[] = [];
++    let depth = 0;
++    let current = '';
++    for (const ch of text) {
++        if (ch === '(' || ch === '[') {
++            depth++;
++        } else if (ch === ')' || ch === ']') {
++            depth--;
++        }
++        if (ch === ',' && depth === 0) {
++            out.push(current.trim());
++            current = '';
++        } else {
++            current += ch;
++        }
++    }
++    if (current.trim()) {
++        out.push(current.trim());
++    }
++    return out;
++}
++
++function scopeSelector(selector: string): string | undefined {
++    // 편집기 안을 가리키는 규칙(.ws, 교과형 표시, 위쪽 막대)은 건너뛴다
++    if (/\.ws\b|practical_course_mode|common_gnb|\.el-practical/.test(selector)) {
++        return undefined;
++    }
++    let sel = selector.trim();
++    let pseudo = '';
++    const m = sel.match(PSEUDO_ELEMENT);
++    if (m) {
++        pseudo = m[0];
++        sel = sel.slice(0, -pseudo.length);
++    }
++    sel = sel.replace(/^(?:html|:root)\s*/i, '');
++    let prefix = `body.${BODY_CLASS} `;
++    if (/^body\b/i.test(sel)) {
++        sel = sel.replace(/^body/i, '');
++        prefix = `body.${BODY_CLASS}`;
++    }
++    if (!sel.trim()) {
++        return undefined; // body 자체 규칙은 바꿀 필요 없음
++    }
++    // 마지막 단위(대상 요소)가 .ws 밖일 때만
++    return `${prefix}${sel}:not(.ws *)${pseudo}`;
++}
++
++/* ---------- 규칙 복사 ---------- */
++
++/*
++ * 바뀐 색만 덧씌우면 원래 규칙끼리의 우선순위가 깨진다
++ * (예: 확인창 버튼 = 파란 바탕, 그중 [취소] = 흰 바탕 → 파란 바탕만 보라로 덧씌우면 [취소]까지 보라가 됨).
++ * 그래서 ① 한 번이라도 색이 바뀌는 속성(배경색·글자색·테두리색 …)을 모은 뒤
++ *        ② 그 속성을 쓰는 모든 규칙을 (바꿀 색은 바꾸고, 나머지는 그대로) 같은 순서로 복사한다.
++ *        복사본은 모두 같은 만큼 우선순위가 올라가므로 원래 순서·우선순위 관계가 그대로 유지된다.
++ */
++function walk(rules: CSSRuleList, visit: (rule: CSSStyleRule) => string | undefined, out: string[]) {
++    Array.from(rules).forEach((rule) => {
++        if (rule instanceof CSSStyleRule) {
++            const text = visit(rule);
++            text && out.push(text);
++        } else if (typeof CSSMediaRule !== 'undefined' && rule instanceof CSSMediaRule) {
++            const inner: string[] = [];
++            walk(rule.cssRules, visit, inner);
++            inner.length && out.push(`@media ${rule.conditionText || rule.media.mediaText}{${inner.join('')}}`);
++        } else if (typeof CSSSupportsRule !== 'undefined' && rule instanceof CSSSupportsRule) {
++            const inner: string[] = [];
++            walk(rule.cssRules, visit, inner);
++            inner.length && out.push(`@supports ${rule.conditionText}{${inner.join('')}}`);
++        }
++    });
++}
++
++const TOKEN = /[.#][\w-]+/g;
++
++function collectChangedProps(rule: CSSStyleRule, props: Set<string>, tokens: Set<string>) {
++    const style = rule.style;
++    let changed = false;
++    for (let i = 0; i < style.length; i++) {
++        const prop = style[i];
++        const value = style.getPropertyValue(prop);
++        if (value && /#|rgb/i.test(value) && convertValue(value) !== value) {
++            props.add(prop);
++            changed = true;
++        }
++    }
++    if (changed) {
++        (rule.selectorText.match(TOKEN) || []).forEach((t) => tokens.add(t));
++    }
++    return undefined;
++}
++
++function copyRule(rule: CSSStyleRule, props: Set<string>, tokens: Set<string>) {
++    const style = rule.style;
++    const decls: string[] = [];
++    let changed = false;
++    for (let i = 0; i < style.length; i++) {
++        const prop = style[i];
++        if (!props.has(prop)) {
++            continue;
++        }
++        const value = style.getPropertyValue(prop);
++        if (!value) {
++            continue;
++        }
++        const next = convertValue(value);
++        if (next === value && value.length > 200) {
++            continue; // 바뀌지 않는 긴 값(그림 data URL 등)은 복사하지 않는다 — 테마 크기를 작게
++        }
++        changed = changed || next !== value;
++        const important = style.getPropertyPriority(prop) ? ' !important' : '';
++        decls.push(`${prop}:${next}${important}`);
++    }
++    if (!decls.length) {
++        return undefined;
++    }
++    // 색이 안 바뀌는 규칙은, 색이 바뀌는 규칙과 같은 이름(class/id)을 쓰는 것만 (같은 요소에 겹칠 수 있는 것만) 복사
++    if (!changed && !(rule.selectorText.match(TOKEN) || []).some((t) => tokens.has(t))) {
++        return undefined;
++    }
++    const selectors = splitSelectors(rule.selectorText)
++        .map(scopeSelector)
++        .filter(Boolean);
++    if (!selectors.length) {
++        return undefined;
++    }
++    return `${selectors.join(',')}{${decls.join(';')}}`;
++}
++
++function sheetsSignature() {
++    return Array.from(document.styleSheets)
++        .map((s) => {
++            try {
++                return `${(s.ownerNode as Element)?.id || ''}:${s.cssRules.length}`;
++            } catch (e) {
++                return 'x';
++            }
++        })
++        .join('|');
++}
++
++function build() {
++    timer = undefined;
++    if (!enabled) {
++        return;
++    }
++    const signature = sheetsSignature();
++    if (signature === lastSignature && document.getElementById(STYLE_ID)) {
++        return;
++    }
++    const started = Date.now();
++    const sheets: CSSRuleList[] = [];
++    Array.from(document.styleSheets).forEach((sheet) => {
++        const owner = sheet.ownerNode as Element | null;
++        if (owner && owner.id === STYLE_ID) {
++            return;
++        }
++        try {
++            sheets.push(sheet.cssRules);
++        } catch (e) {
++            // 다른 출처 스타일은 읽을 수 없음
++        }
++    });
++    const props = new Set<string>();
++    const tokens = new Set<string>();
++    sheets.forEach((rules) => walk(rules, (rule) => collectChangedProps(rule, props, tokens), []));
++    const out: string[] = [];
++    if (props.size) {
++        sheets.forEach((rules) => walk(rules, (rule) => copyRule(rule, props, tokens), out));
++    }
++    let style = document.getElementById(STYLE_ID) as HTMLStyleElement | null;
++    if (!style) {
++        style = document.createElement('style');
++        style.id = STYLE_ID;
++    }
++    style.textContent = out.join('\n');
++    // 항상 맨 뒤에 둔다 (같은 우선순위면 뒤가 이김)
++    document.head.appendChild(style);
++    lastSignature = sheetsSignature();
++    (window as any).__elPracticalThemeMs = Date.now() - started; // 확인용
++}
++
++function schedule() {
++    if (!timer) {
++        timer = setTimeout(build, 30);
++    }
++}
++
++/** 교과형이면 true. 모드가 바뀔 때마다 부른다 */
++export function setPracticalTheme(on: boolean) {
++    if (typeof document === 'undefined') {
++        return;
++    }
++    enabled = !!on;
++    document.body.classList.toggle(BODY_CLASS, enabled);
++    if (!enabled) {
++        return; // 만든 규칙은 body 표시가 없으면 아무 데도 안 맞는다
++    }
++    build();
++    if (!observer && typeof MutationObserver !== 'undefined') {
++        // 새 창이 스타일을 더하면 다시 만든다 (실제로 바뀌었는지는 build 가 규칙 수로 가볍게 확인)
++        observer = new MutationObserver((records) => {
++            if (!enabled) {
++                return;
++            }
++            const ours = records.every((r) => {
++                const t = r.target as Element;
++                return t.id === STYLE_ID || (t.parentNode as Element | null)?.id === STYLE_ID;
++            });
++            if (!ours) {
++                schedule();
++            }
++        });
++        observer.observe(document.head, { childList: true, subtree: true, characterData: true });
++        observer.observe(document.body, { childList: true });
++        // 스타일을 글 대신 insertRule 로 더하는 꾸러미도 있어서, 가끔 규칙 수를 확인한다
++        setInterval(() => enabled && schedule(), 1500);
++    }
++}
++
++export function isPracticalTheme() {
++    return enabled;
 +}
 diff --git a/src/renderer/helper/printProject.ts b/src/renderer/helper/printProject.ts
 new file mode 100644
