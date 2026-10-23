@@ -8680,7 +8680,7 @@ index 00000000..86986717
 +}
 diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
 new file mode 100644
-index 00000000..97a7c86c
+index 00000000..7ca2e548
 --- /dev/null
 +++ b/src/common/buildInfo.ts
 @@ -0,0 +1,22 @@
@@ -8692,7 +8692,7 @@ index 00000000..97a7c86c
 + *   - ENTRY_LOCAL_BUILD: 같은 버전 안에서 어떤 패치로 빌드됐는지 구별하는 날짜 번호
 + */
 +export const APP_VERSION = '1.0.0';
-+export const ENTRY_LOCAL_BUILD = '2026.10.23-k'; // 안드로이드 입력칸 글자 거꾸로 입력 고침
++export const ENTRY_LOCAL_BUILD = '2026.10.23-l'; // 안드로이드 입력칸 글자 순서 뒤섞임 2차 고침
 +
 +/** 앱 이름 (안드로이드 / Windows) */
 +export const APP_NAME_ANDROID = 'Entry for Android';
@@ -11967,7 +11967,7 @@ index eb89ad9b..baaa8a44 100644
      return (
          <div>
 diff --git a/src/renderer/components/workspace.tsx b/src/renderer/components/workspace.tsx
-index 32eb38dd..d71c11ac 100644
+index 32eb38dd..90ee8f55 100644
 --- a/src/renderer/components/workspace.tsx
 +++ b/src/renderer/components/workspace.tsx
 @@ -1,5 +1,5 @@
@@ -11977,7 +11977,7 @@ index 32eb38dd..d71c11ac 100644
  import './workspace.scss';
  import '../resources/styles/fonts.scss';
  import { connect } from 'react-redux';
-@@ -23,6 +23,58 @@ import { IMapDispatchToProps, IMapStateToProps } from '../store';
+@@ -23,6 +23,59 @@ import { IMapDispatchToProps, IMapStateToProps } from '../store';
  import DragAndDropContainer from './DragAndDropContainer';
  import EntryModalHelper from '../helper/entry/entryModalHelper';
  import ipcRendererHelper from '../helper/ipcRendererHelper';
@@ -12018,6 +12018,7 @@ index 32eb38dd..d71c11ac 100644
 +import { startEditorLabels } from '../helper/editorLabels';
 +import { installBlockMenuOrder } from '../helper/blockMenuOrder';
 +import { installBackpack } from '../helper/backpack';
++import { installInputCaretFix } from '../helper/inputCaretFix';
 +import { installTouchSliders } from '../helper/touchSliders';
 +import { lt, setMainLang, currentLang } from '../../common/localLang';
 +
@@ -12036,7 +12037,7 @@ index 32eb38dd..d71c11ac 100644
  
  interface IProps extends IReduxDispatch, IReduxState {}
  
-@@ -34,9 +86,38 @@ class Workspace extends Component<IProps> {
+@@ -34,9 +87,38 @@ class Workspace extends Component<IProps> {
      private isFirstRender = true;
      private isSavingCanvasData = false;
      private isSaveProject = false;
@@ -12076,7 +12077,7 @@ index 32eb38dd..d71c11ac 100644
          libDir: '../../../node_modules',
          defaultDir: '../../renderer/resources',
          entryDir: '/entry-js',
-@@ -60,7 +141,15 @@ class Workspace extends Component<IProps> {
+@@ -60,7 +142,15 @@ class Workspace extends Component<IProps> {
      };
  
      get initOption() {
@@ -12093,7 +12094,7 @@ index 32eb38dd..d71c11ac 100644
      }
  
      constructor(props: Readonly<IProps>) {
-@@ -86,7 +175,13 @@ class Workspace extends Component<IProps> {
+@@ -86,7 +176,14 @@ class Workspace extends Component<IProps> {
      }
  
      componentDidMount() {
@@ -12103,12 +12104,13 @@ index 32eb38dd..d71c11ac 100644
 +        startCloudState();
 +        startEditorLabels(); // 모양·소리 편집기 도구 이름을 화면 언어에 맞춤
 +        installBlockMenuOrder(); // 블록 오른쪽 메뉴: 복사하기 → 복제하기 → 잘라내기 → 삭제하기
++        installInputCaretFix(); // [entry-local] 안드로이드 입력칸 글자 순서 뒤섞임 고침
 +        installTouchSliders(); // 소리 편집기 크기·빠르기·음높이 슬라이더를 손가락으로도
 +        this.syncMainLang();
          setTimeout(async () => {
              await this._waitFontLoad();
              try {
-@@ -108,7 +203,133 @@ class Workspace extends Component<IProps> {
+@@ -108,7 +205,133 @@ class Workspace extends Component<IProps> {
          }, 0);
      }
  
@@ -12242,7 +12244,7 @@ index 32eb38dd..d71c11ac 100644
          if (
              prevProps.common.projectName &&
              prevProps.common.projectName !== this.props.common.projectName
-@@ -139,9 +360,8 @@ class Workspace extends Component<IProps> {
+@@ -139,9 +362,8 @@ class Workspace extends Component<IProps> {
      addEntryEvents() {
          const addEventListener = Entry.addEventListener.bind(Entry);
  
@@ -12254,7 +12256,7 @@ index 32eb38dd..d71c11ac 100644
          // 교과형에서 하드웨어가 바뀔때 마다 카테고리 변화
          addEventListener('hwChanged', this.handleHardwareChange);
          // 하드웨어 다운로드 탭에서 다운로드 처리
-@@ -162,6 +382,14 @@ class Workspace extends Component<IProps> {
+@@ -162,6 +384,14 @@ class Workspace extends Component<IProps> {
          addEventListener('saveAsWorkspace', () => {
              this.handleSaveAction('saveAs');
          });
@@ -12269,7 +12271,7 @@ index 32eb38dd..d71c11ac 100644
          addEventListener('saveCanvasImage', (data: any) => {
              this.handleCanvasImageSave(data);
          });
-@@ -373,6 +601,10 @@ class Workspace extends Component<IProps> {
+@@ -373,6 +603,10 @@ class Workspace extends Component<IProps> {
          const project = Entry.exportProject();
          if (project) {
              project.name = this._getProjectName();
@@ -12280,7 +12282,7 @@ index 32eb38dd..d71c11ac 100644
              Object.assign(project, option);
              LocalStorageManager.saveProject(project);
          }
-@@ -438,78 +670,486 @@ class Workspace extends Component<IProps> {
+@@ -438,78 +672,486 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -12818,7 +12820,7 @@ index 32eb38dd..d71c11ac 100644
      };
  
      handleFileAction = async (type: string) => {
-@@ -518,6 +1158,10 @@ class Workspace extends Component<IProps> {
+@@ -518,6 +1160,10 @@ class Workspace extends Component<IProps> {
                  await RendererUtils.clearTempProject();
                  await this.loadProject();
              }
@@ -12829,7 +12831,7 @@ index 32eb38dd..d71c11ac 100644
          } else if (type === 'open_offline') {
              this._loadProjectFromFile(
                  () =>
-@@ -576,11 +1220,33 @@ class Workspace extends Component<IProps> {
+@@ -576,11 +1222,33 @@ class Workspace extends Component<IProps> {
          let projectWorkspaceMode = currentWorkspaceMode;
  
          if (project) {
@@ -12863,7 +12865,7 @@ index 32eb38dd..d71c11ac 100644
              delete this.projectSavedPath;
              delete this.projectParent;
              CommonActions.changeProjectName(RendererUtils.getDefaultProjectName());
-@@ -602,8 +1268,14 @@ class Workspace extends Component<IProps> {
+@@ -602,8 +1270,14 @@ class Workspace extends Component<IProps> {
          }
          Entry.reloadBlock();
          this.isFirstRender = false;
@@ -12878,7 +12880,7 @@ index 32eb38dd..d71c11ac 100644
          try {
              if (project) {
                  await Entry.loadExternalModules(project);
-@@ -633,9 +1305,40 @@ class Workspace extends Component<IProps> {
+@@ -633,9 +1307,40 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -12919,7 +12921,7 @@ index 32eb38dd..d71c11ac 100644
          await this.loadProject(project);
      };
  
-@@ -717,6 +1420,8 @@ class Workspace extends Component<IProps> {
+@@ -717,6 +1422,8 @@ class Workspace extends Component<IProps> {
                          onFileAction={this.handleFileAction}
                          onReloadProject={this.reloadProject}
                          onLoadProject={this.loadProject}
@@ -14143,10 +14145,10 @@ index 00000000..af572b2e
 +}
 diff --git a/src/renderer/helper/entry/localMode.ts b/src/renderer/helper/entry/localMode.ts
 new file mode 100644
-index 00000000..4e031f52
+index 00000000..16bbe93e
 --- /dev/null
 +++ b/src/renderer/helper/entry/localMode.ts
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,106 @@
 +/**
 + * [entry-local] 로컬 전용 동작 모음
 + *
@@ -14212,6 +14214,10 @@ index 00000000..4e031f52
 +        input, textarea, [contenteditable='true'] {
 +            -webkit-user-select: text !important;
 +            user-select: text !important;
++        }
++        /* 글자를 치는 동안에는 말줄임(…) 끔 — 안드로이드에서 말줄임 입력칸은 커서 위치가 어긋날 수 있음 */
++        input:focus, textarea:focus {
++            text-overflow: clip !important;
 +        }
 +        /* 신호 이름 입력칸: 앱 기본 스타일(input = content-box) 때문에 오른쪽으로 삐져나옴 → 리스트 이름 칸과 같게 */
 +        .entryVariableListWorkspace .msdAddSpaceWrapper input[type='text'] {
@@ -14487,6 +14493,89 @@ index a66149f6..22cc0a69 100644
          window.initNativeMenu();
      }
  }
+diff --git a/src/renderer/helper/inputCaretFix.ts b/src/renderer/helper/inputCaretFix.ts
+new file mode 100644
+index 00000000..d0f164c5
+--- /dev/null
++++ b/src/renderer/helper/inputCaretFix.ts
+@@ -0,0 +1,77 @@
++/**
++ * [entry-local] 안드로이드 입력칸 커서 고침 (right → thgir / ght ir 처럼 글자 순서가 뒤섞이는 문제)
++ *
++ * 엔트리 오브젝트 목록 등은 끌어서 옮기는 곳이라 바깥 상자들에 "글자 선택 안 됨(user-select:none)"이 걸려 있다.
++ * 안드로이드 웹뷰는 이런 상자 안의 입력칸에서 키보드(IME)에 커서 위치를 제대로 알려주지 못해
++ * 키보드가 글자를 엉뚱한 자리(맨 앞 등)에 끼워 넣는다.
++ * 입력칸 자체만 풀어서는 부족해서(2026.10.23-k), 입력칸에 커서가 들어가 있는 동안은
++ * 바깥 상자들의 user-select:none 도 잠깐 풀고, 커서가 나가면 원래대로 되돌린다.
++ */
++let installed = false;
++
++const TEXT_TYPES = /^(text|search|number|tel|url|email|password|)$/i;
++
++function isTextField(el: EventTarget | null): el is HTMLInputElement | HTMLTextAreaElement {
++    if (el instanceof HTMLTextAreaElement) {
++        return true;
++    }
++    return el instanceof HTMLInputElement && TEXT_TYPES.test(el.type || '');
++}
++
++export function installInputCaretFix() {
++    if (installed || typeof document === 'undefined') {
++        return;
++    }
++    installed = true;
++    let restore: Array<() => void> = [];
++
++    const release = () => {
++        restore.forEach((fn) => fn());
++        restore = [];
++    };
++
++    document.addEventListener(
++        'focusin',
++        (e) => {
++            const target = e.target;
++            if (!isTextField(target)) {
++                return;
++            }
++            release();
++            let el: HTMLElement | null = target;
++            while (el && el !== document.documentElement) {
++                const cs = getComputedStyle(el);
++                if (cs.userSelect === 'none' || (cs as any).webkitUserSelect === 'none' || el === target) {
++                    const node = el;
++                    const prev = node.style.getPropertyValue('user-select');
++                    const prevPriority = node.style.getPropertyPriority('user-select');
++                    const prevWk = node.style.getPropertyValue('-webkit-user-select');
++                    const prevWkPriority = node.style.getPropertyPriority('-webkit-user-select');
++                    node.style.setProperty('user-select', 'text', 'important');
++                    node.style.setProperty('-webkit-user-select', 'text', 'important');
++                    restore.push(() => {
++                        node.style.setProperty('user-select', prev, prevPriority);
++                        node.style.setProperty('-webkit-user-select', prevWk, prevWkPriority);
++                        if (!prev) {
++                            node.style.removeProperty('user-select');
++                        }
++                        if (!prevWk) {
++                            node.style.removeProperty('-webkit-user-select');
++                        }
++                    });
++                }
++                el = el.parentElement;
++            }
++        },
++        true
++    );
++    document.addEventListener(
++        'focusout',
++        (e) => {
++            if (isTextField(e.target)) {
++                release();
++            }
++        },
++        true
++    );
++}
 diff --git a/src/renderer/helper/ipcRendererHelper.ts b/src/renderer/helper/ipcRendererHelper.ts
 index fbdd0052..13ba8c1d 100644
 --- a/src/renderer/helper/ipcRendererHelper.ts
