@@ -244,7 +244,7 @@ index 00000000..043df802
 +!/build/.npmkeep
 diff --git a/mobile/android/app/build.gradle b/mobile/android/app/build.gradle
 new file mode 100644
-index 00000000..aa70e5c8
+index 00000000..4d4ad11b
 --- /dev/null
 +++ b/mobile/android/app/build.gradle
 @@ -0,0 +1,71 @@
@@ -257,8 +257,8 @@ index 00000000..aa70e5c8
 +        applicationId "biz.softline.entrylocal"
 +        minSdkVersion rootProject.ext.minSdkVersion
 +        targetSdkVersion rootProject.ext.targetSdkVersion
-+        versionCode 1
-+        versionName "2.1.36"
++        versionCode 110
++        versionName "1.1.0"
 +        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 +        aaptOptions {
 +             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -465,10 +465,10 @@ index 00000000..28d6785c
 +</manifest>
 diff --git a/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
 new file mode 100644
-index 00000000..af7f61ba
+index 00000000..d50642c7
 --- /dev/null
 +++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
-@@ -0,0 +1,1002 @@
+@@ -0,0 +1,1291 @@
 +package biz.softline.entrylocal;
 +
 +import android.app.Dialog;
@@ -972,6 +972,7 @@ index 00000000..af7f61ba
 +    @PluginMethod
 +    public void logout(final PluginCall call) {
 +        main.post(() -> {
++            destroyWarm();
 +            WebStorage.getInstance().deleteOrigin(ORIGIN);
 +            WebStorage.getInstance().deleteOrigin("https://www.playentry.org");
 +            CookieManager cookies = CookieManager.getInstance();
@@ -997,6 +998,15 @@ index 00000000..af7f61ba
 +            call.reject(tr("엔트리 주소가 아닙니다.", "This is not an Entry address."));
 +            return;
 +        }
++        if (Boolean.TRUE.equals(call.getBoolean("keepWarm", false))) {
++            runWarm(call, url, script, timeoutMs); // [1.1] 받아 온 작업 화면을 다음 저장에 그대로 쓴다
++            return;
++        }
++        runFresh(call, url, script, timeoutMs);
++    }
++
++    /** 엔트리 페이지를 새 웹뷰에 열어 script 를 실행하고 웹뷰는 버린다 */
++    private void runFresh(final PluginCall call, final String url, final String script, final int timeoutMs) {
 +        main.post(() -> {
 +            final boolean[] finished = { false };
 +            final boolean[] started = { false };
@@ -1073,8 +1083,243 @@ index 00000000..af7f61ba
 +        });
 +    }
 +
++    /* ------------------------------------------------------------------ */
++    /* [1.1] 계정 저장 가속 — 엔트리 작업 화면 웹뷰(warm)를 다시 쓴다             */
++    /* 저장할 때마다 엔트리 작업 화면(수 MB)을 새로 불러오던 것이 시간의 대부분이었다. */
++    /* 저장이 끝난 웹뷰를 버리지 않고 그 작품 화면 그대로 앱 화면 뒤에 두었다가,       */
++    /* 같은 작품을 다시 저장하면 불러오기 없이 바로 저장한다.                        */
++    /*  - 계정 작품을 열거나(run keepWarm) 저장 메뉴를 열면(prewarm) 미리 불러 둔다    */
++    /*  - 쉬는 동안은 그리기를 멈추고(onPause·INVISIBLE), 5분 동안 안 쓰면 없앤다      */
++    /*  - 작품 파일은 스크립트에 넣지 않고 페이지가 EntryLocalSave.getEnt() 로 받아 간다 */
++    /* ------------------------------------------------------------------ */
++    private static final long WARM_IDLE_MS = 5 * 60 * 1000;
++    private static final java.util.regex.Pattern WS_ID = java.util.regex.Pattern.compile("/ws/([0-9a-fA-F]{24})");
++
++    private interface WarmListener {
++        void onUrl(String url);
++
++        void onLoaded(String url);
++    }
++
++    private WebView warmWeb;
++    private String warmUrl; // 다 불러온 주소
++    private String warmLoadingUrl; // 불러오는 중인 주소
++    private WarmListener warmListener;
++    private ValueCallback<String> warmOnDone;
++    private ValueCallback<String> warmOnDoneOverwrite;
++    private volatile String warmEnt; // 지금 저장하는 작품 (.ent, base64)
++    private File warmFile;
++    private final java.util.Map<String, ValueCallback<String>> warmRuns = new java.util.concurrent.ConcurrentHashMap<>();
++    private final Runnable warmIdleKill = this::destroyWarm;
++
++    /** 두 주소가 같은 작업 화면인가 (/ws/<같은 id> 또는 둘 다 /ws/new) */
++    private static boolean sameWs(String a, String b) {
++        if (a == null || b == null) return false;
++        java.util.regex.Matcher ma = WS_ID.matcher(a);
++        java.util.regex.Matcher mb = WS_ID.matcher(b);
++        boolean ha = ma.find();
++        boolean hb = mb.find();
++        if (ha && hb) return ma.group(1).equalsIgnoreCase(mb.group(1));
++        if (ha || hb) return false;
++        String pa = Uri.parse(a).getPath();
++        String pb = Uri.parse(b).getPath();
++        return pa != null && pb != null && pa.startsWith("/ws/new") && pb.startsWith("/ws/new");
++    }
++
++    private WebView warmWeb() {
++        if (warmWeb != null) return warmWeb;
++        final WebView appWeb = getBridge().getWebView();
++        final ViewGroup host = (ViewGroup) appWeb.getParent();
++        final WebView web = new WebView(getContext());
++        configure(web);
++        web.getSettings().setUserAgentString(web.getSettings().getUserAgentString().replace("; wv", ""));
++        web.setWebChromeClient(new WebChromeClient() {
++            @Override
++            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
++                // 엔트리 '오프라인 작품 불러오기' 등 파일 선택 → 지금 작품 파일을 바로 넣어 준다
++                File f = warmFile;
++                callback.onReceiveValue(f != null ? new Uri[] { Uri.fromFile(f) } : null);
++                return true;
++            }
++        });
++        web.addJavascriptInterface(new Object() {
++            @JavascriptInterface
++            public String getEnt() {
++                String e = warmEnt;
++                return e == null ? "" : e;
++            }
++
++            @JavascriptInterface
++            public void done(String json) {
++                main.post(() -> {
++                    ValueCallback<String> cb = warmOnDone;
++                    if (cb != null) cb.onReceiveValue(json);
++                });
++            }
++
++            @JavascriptInterface
++            public void doneOverwrite(String json) {
++                main.post(() -> {
++                    ValueCallback<String> cb = warmOnDoneOverwrite;
++                    if (cb != null) cb.onReceiveValue(json);
++                });
++            }
++        }, "EntryLocalSave");
++        web.addJavascriptInterface(new Object() {
++            @JavascriptInterface
++            public void done(String token, String payload) {
++                final ValueCallback<String> cb = warmRuns.remove(token);
++                if (cb != null) main.post(() -> cb.onReceiveValue(payload));
++            }
++        }, "EntryLocalBridge");
++        web.setWebViewClient(new WebViewClient() {
++            @Override
++            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
++                String scheme = request.getUrl().getScheme();
++                return !("http".equals(scheme) || "https".equals(scheme));
++            }
++
++            @Override
++            public void onPageStarted(WebView view, String started, android.graphics.Bitmap favicon) {
++                if (view != warmWeb) return;
++                warmUrl = null;
++                WarmListener l = warmListener;
++                if (l != null) l.onUrl(started);
++            }
++
++            @Override
++            public void doUpdateVisitedHistory(WebView view, String visited, boolean isReload) {
++                if (view != warmWeb) return;
++                WarmListener l = warmListener;
++                if (l != null) l.onUrl(visited);
++            }
++
++            @Override
++            public void onPageFinished(WebView view, String loaded) {
++                if (view != warmWeb || loaded == null || loaded.startsWith("about:")) return;
++                warmUrl = loaded;
++                warmLoadingUrl = null;
++                WarmListener l = warmListener;
++                if (l != null) l.onLoaded(loaded);
++            }
++        });
++        // 앱 화면 아래(맨 뒤)에 같은 크기로 붙인다 → 사용자에게는 앱 화면만 보인다
++        if (appWeb.getBackground() == null) appWeb.setBackgroundColor(Color.WHITE);
++        host.addView(web, 0, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
++        warmWeb = web;
++        return web;
++    }
++
++    private void loadWarm(String url) {
++        WebView web = warmWeb();
++        warmUrl = null;
++        warmLoadingUrl = url;
++        web.loadUrl(url);
++    }
++
++    /** 쓰는 중: 다시 그리기 시작 */
++    private void warmActive() {
++        main.removeCallbacks(warmIdleKill);
++        if (warmWeb != null) {
++            warmWeb.setVisibility(View.VISIBLE);
++            warmWeb.onResume();
++        }
++    }
++
++    /** 쉬는 중: 그리기를 멈추고, 오래 안 쓰면 없앤다 */
++    private void warmIdle() {
++        warmListener = null;
++        warmOnDone = null;
++        warmOnDoneOverwrite = null;
++        warmEnt = null;
++        if (warmFile != null) {
++            warmFile.delete();
++            warmFile = null;
++        }
++        main.removeCallbacks(warmIdleKill);
++        if (warmWeb != null) {
++            warmWeb.onPause();
++            warmWeb.setVisibility(View.INVISIBLE);
++            main.postDelayed(warmIdleKill, WARM_IDLE_MS);
++        }
++    }
++
++    private void destroyWarm() {
++        main.removeCallbacks(warmIdleKill);
++        warmListener = null;
++        warmOnDone = null;
++        warmOnDoneOverwrite = null;
++        warmEnt = null;
++        warmUrl = null;
++        warmLoadingUrl = null;
++        warmRuns.clear();
++        if (warmFile != null) {
++            warmFile.delete();
++            warmFile = null;
++        }
++        WebView web = warmWeb;
++        warmWeb = null;
++        if (web != null) {
++            try {
++                web.stopLoading();
++                ViewGroup parent = (ViewGroup) web.getParent();
++                if (parent != null) parent.removeView(web);
++            } catch (Exception ignored) {
++                // 이미 떨어짐
++            }
++            web.destroy();
++        }
++    }
++
++    /** 작업 화면이 url 로 이미 다 열려 있으면 true */
++    private boolean warmReadyFor(String url) {
++        return warmWeb != null && warmUrl != null && isAfterLogin(warmUrl) && sameWs(warmUrl, url);
++    }
++
++    /** [1.1] 저장 메뉴를 열었을 때 등: 작업 화면을 미리 불러 둔다 (저장 중이면 아무것도 안 함) */
++    @PluginMethod
++    public void prewarm(final PluginCall call) {
++        final String url = call.getString("url", "");
++        Uri target = Uri.parse(url);
++        if (!"https".equals(target.getScheme()) || !isEntryHost(target)) {
++            call.resolve();
++            return;
++        }
++        main.post(() -> {
++            if (currentSaveCancel != null || warmListener != null) {
++                call.resolve();
++                return;
++            }
++            if (warmReadyFor(url) || (warmLoadingUrl != null && sameWs(warmLoadingUrl, url))) {
++                call.resolve();
++                return;
++            }
++            warmWeb();
++            warmActive();
++            warmListener = new WarmListener() {
++                @Override
++                public void onUrl(String visited) {
++                    if (isEntrySignin(visited)) destroyWarm(); // 세션 만료: 다음 저장 때 다시
++                }
++
++                @Override
++                public void onLoaded(String loaded) {
++                    warmListener = null;
++                    // 엔트리가 작품을 다 꺼낼 시간을 조금 준 뒤 쉬게 한다
++                    main.postDelayed(() -> {
++                        if (warmListener == null && currentSaveCancel == null && warmWeb != null) warmIdle();
++                    }, 6000);
++                }
++            };
++            loadWarm(url);
++            call.resolve();
++        });
++    }
++
 +    /**
-+     * 엔트리 계정에 저장 (자동): 엔트리 작업 화면을 가린 채 열고, 사이트의 [오프라인 작품 불러오기]에 지금 작품을 넣는다.
++     * 엔트리 계정에 저장 (자동): 엔트리 작업 화면을 앱 화면 뒤에 열고(이미 열려 있으면 그대로)
++     *  - 덮어쓰기: overwriteScript (계정 작품 id 가 있을 때) → 안 되면 newUrl 에서 새 작품으로 저장
++     *  - 새 작품: importScript 가 [file] → [오프라인 작품 불러오기]에 작품 파일을 직접 넣는다
 +     * 결과 { projectId, saved, failed }.
 +     */
 +    @PluginMethod
@@ -1082,13 +1327,9 @@ index 00000000..af7f61ba
 +        final String url = call.getString("url", "");
 +        final String base64 = call.getString("ent", "");
 +        final String fileName = call.getString("fileName", "project.ent").replaceAll("[\\\\/:*?\"<>|]", "_");
-+        final String help = call.getString("help", "");
-+        // 자동 진행 스크립트 (작품 파일 내용 포함)
 +        final String importScript = call.getString("importScript", "");
-+        // 덮어쓰기 (계정 작품 id 가 있을 때): 그 작품 작업 화면에서 overwriteScript 실행 → 안 되면 newUrl 에서 새 작품으로 저장
 +        final String overwriteScript = call.getString("overwriteScript", "");
 +        final String newUrl = call.getString("newUrl", "");
-+        final JSObject texts = call.getObject("texts", new JSObject());
 +        Uri target = Uri.parse(url);
 +        if (!"https".equals(target.getScheme()) || !isEntryHost(target)) {
 +            call.reject(tr("엔트리 주소가 아닙니다.", "This is not an Entry address."));
@@ -1107,44 +1348,42 @@ index 00000000..af7f61ba
 +            return;
 +        }
 +        main.post(() -> {
++            if (cancelPending) {
++                // 준비가 끝나기 전에 [취소]를 누름
++                cancelPending = false;
++                file.delete();
++                call.resolve(new JSObject());
++                return;
++            }
 +            final String[] projectId = { call.getString("projectId", "") };
-+            // 엔트리 작업 화면은 앱 화면(웹뷰) '뒤'에 깔아 보이지 않게 돌린다.
-+            // 대기 창은 앱 화면이 직접 그린다 (저장 완료 창과 같은 모양 · [취소] → cancelSave)
-+            final WebView appWeb = getBridge().getWebView();
-+            final ViewGroup host = (ViewGroup) appWeb.getParent();
-+            final WebView web = new WebView(getContext());
-+            configure(web);
-+            web.getSettings().setUserAgentString(web.getSettings().getUserAgentString().replace("; wv", ""));
-+            web.setWebChromeClient(new WebChromeClient() {
-+                @Override
-+                public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
-+                    // 엔트리 '오프라인 작품 불러오기' 등 파일 선택 → 지금 작품 파일을 바로 넣어 준다
-+                    callback.onReceiveValue(new Uri[] { Uri.fromFile(file) });
-+                    return true;
-+                }
-+            });
-+            // ---- 자동 진행 (실제 엔트리 구조 기준) ----
-+            // 작업 화면이 열리면 importScript 가 [file] → [오프라인 작품 불러오기]에 작품 파일을 직접 넣는다.
-+            // 엔트리는 그 파일로 계정에 새 작품을 만들고 /ws/<새 id> 로 이동한다 → 저장 완료.
 +            final boolean[] closed = { false };
 +            final boolean[] saved = { false };
 +            final boolean[] autoStarted = { false };
 +            final boolean[] failed = { false };
-+            final java.util.regex.Pattern WS_ID = java.util.regex.Pattern.compile("/ws/([0-9a-fA-F]{24})");
 +            final String[] startId = { null };
 +            final boolean[] overwriting = { !overwriteScript.isEmpty() };
 +            final Runnable[] fail = { null };
++            final WebView web = warmWeb();
++            warmActive();
++            if (warmFile != null && warmFile != file) warmFile.delete();
++            warmFile = file;
++            warmEnt = base64;
 +            final Runnable finish = () -> {
 +                if (closed[0]) return;
 +                closed[0] = true;
 +                if (fail[0] != null) main.removeCallbacks(fail[0]);
-+                if (currentSaveCancel != null) currentSaveCancel = null;
-+                try {
-+                    web.stopLoading();
-+                    host.removeView(web);
-+                    web.destroy();
-+                } catch (Exception ignored) {
-+                    // 이미 정리됨
++                currentSaveCancel = null;
++                if (saved[0]) {
++                    // 다음 저장(덮어쓰기)에 그대로 쓴다. 새 작품으로 저장한 경우 엔트리가 새 작품 화면을 불러오는 중
++                    warmListener = null;
++                    warmOnDone = null;
++                    warmOnDoneOverwrite = null;
++                    main.postDelayed(() -> {
++                        if (warmListener == null && currentSaveCancel == null && warmWeb != null) warmIdle();
++                    }, overwriting[0] ? 0 : 8000);
++                    warmEnt = null;
++                } else {
++                    destroyWarm(); // 실패·취소: 하던 일을 멈추고 다음에는 새로
 +                }
 +                file.delete();
 +                CookieManager.getInstance().flush();
@@ -1161,119 +1400,169 @@ index 00000000..af7f61ba
 +            };
 +            main.postDelayed(fail[0], overwriteScript.isEmpty() ? 90000 : 180000);
 +            currentSaveCancel = finish; // [취소]: 저장도 실패도 아님
-+            if (cancelPending) {
-+                // 준비가 끝나기 전에 [취소]를 누름
-+                cancelPending = false;
-+                closed[0] = true;
-+                file.delete();
-+                currentSaveCancel = null;
-+                main.removeCallbacks(fail[0]);
-+                call.resolve(new JSObject());
-+                return;
-+            }
-+            final java.util.function.Consumer<String> onUrl = (visited) -> {
-+                if (closed[0] || saved[0] || visited == null) return;
-+                Uri u = Uri.parse(visited);
-+                String path = u.getPath() == null ? "" : u.getPath();
-+                if (isEntryHost(u) && path.startsWith("/signin")) {
-+                    fail[0].run(); // 엔트리 세션 만료
-+                    return;
-+                }
-+                if (overwriting[0]) return; // 덮어쓰기는 페이지를 옮기지 않는다 (결과는 doneOverwrite 로)
-+                java.util.regex.Matcher m = WS_ID.matcher(visited);
-+                if (!autoStarted[0] || !m.find()) return;
-+                String id = m.group(1);
-+                if (id.equals(startId[0])) return;
-+                projectId[0] = id;
-+                saved[0] = true;
-+                main.removeCallbacks(fail[0]);
-+                main.postDelayed(finish, 300);
++            final Runnable runOverwrite = () -> {
++                autoStarted[0] = true;
++                web.evaluateJavascript(
++                    "Promise.resolve().then(() => " + overwriteScript + ")" +
++                    ".then((r) => EntryLocalSave.doneOverwrite(JSON.stringify(r || {})))" +
++                    ".catch(() => EntryLocalSave.doneOverwrite('{}'));",
++                    null
++                );
 +            };
-+            web.addJavascriptInterface(new Object() {
-+                @JavascriptInterface
-+                public void done(String json) {
-+                    main.post(() -> {
-+                        try {
-+                            if (!new JSONObject(json).optBoolean("fed")) fail[0].run(); // 불러오기 메뉴를 못 찾음
-+                        } catch (Exception ignored) {
-+                            // 페이지가 이동하며 끊긴 경우 등: 이동 감지로 판단
-+                        }
-+                    });
++            final Runnable runImport = () -> {
++                autoStarted[0] = true;
++                String cur = web.getUrl();
++                java.util.regex.Matcher m = WS_ID.matcher(cur == null ? "" : cur);
++                startId[0] = m.find() ? m.group(1) : null;
++                web.evaluateJavascript(
++                    "Promise.resolve().then(() => " + importScript + ")" +
++                    ".then((r) => EntryLocalSave.done(JSON.stringify(r || {})))" +
++                    ".catch(() => EntryLocalSave.done('{\"fed\":false}'));",
++                    null
++                );
++            };
++            warmOnDone = (json) -> {
++                if (closed[0]) return;
++                try {
++                    if (!new JSONObject(json).optBoolean("fed")) fail[0].run(); // 불러오기 메뉴를 못 찾음
++                } catch (Exception ignored) {
++                    // 페이지가 이동하며 끊긴 경우 등: 이동 감지로 판단
 +                }
-+
-+                @JavascriptInterface
-+                public void doneOverwrite(String json) {
-+                    main.post(() -> {
-+                        if (closed[0]) return;
-+                        JSONObject o;
-+                        try {
-+                            o = new JSONObject(json);
-+                        } catch (Exception e) {
-+                            o = new JSONObject();
-+                        }
-+                        if (o.optBoolean("saved")) {
-+                            // 같은 작품에 덮어씀
-+                            saved[0] = true;
-+                            main.removeCallbacks(fail[0]);
-+                            finish.run();
-+                        } else if (o.optBoolean("fallback") && !newUrl.isEmpty()) {
-+                            // 덮어쓸 수 없는 작품 → 새 작품으로 저장
-+                            overwriting[0] = false;
-+                            autoStarted[0] = false;
-+                            projectId[0] = "";
-+                            web.loadUrl(newUrl);
-+                        } else {
-+                            fail[0].run();
-+                        }
-+                    });
++            };
++            warmOnDoneOverwrite = (json) -> {
++                if (closed[0]) return;
++                JSONObject o;
++                try {
++                    o = new JSONObject(json);
++                } catch (Exception e) {
++                    o = new JSONObject();
 +                }
-+            }, "EntryLocalSave");
-+            web.setWebViewClient(new WebViewClient() {
++                if (o.optBoolean("saved")) {
++                    // 같은 작품에 덮어씀
++                    saved[0] = true;
++                    finish.run();
++                } else if (o.optBoolean("fallback") && !newUrl.isEmpty() && !importScript.isEmpty()) {
++                    // 덮어쓸 수 없는 작품 → 새 작품으로 저장
++                    overwriting[0] = false;
++                    autoStarted[0] = false;
++                    projectId[0] = "";
++                    loadWarm(newUrl);
++                } else {
++                    fail[0].run();
++                }
++            };
++            warmListener = new WarmListener() {
 +                @Override
-+                public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-+                    String scheme = request.getUrl().getScheme();
-+                    return !("http".equals(scheme) || "https".equals(scheme));
-+                }
-+
-+                @Override
-+                public void onPageStarted(WebView view, String started, android.graphics.Bitmap favicon) {
-+                    onUrl.accept(started);
-+                }
-+
-+                @Override
-+                public void doUpdateVisitedHistory(WebView view, String visited, boolean isReload) {
-+                    onUrl.accept(visited);
-+                }
-+
-+                @Override
-+                public void onPageFinished(WebView view, String loaded) {
-+                    if (autoStarted[0] || closed[0]) return;
-+                    if (overwriting[0]) {
-+                        autoStarted[0] = true;
-+                        view.evaluateJavascript(
-+                            "Promise.resolve().then(() => " + overwriteScript + ")" +
-+                            ".then((r) => EntryLocalSave.doneOverwrite(JSON.stringify(r || {})))" +
-+                            ".catch(() => EntryLocalSave.doneOverwrite('{}'));",
-+                            null
-+                        );
++                public void onUrl(String visited) {
++                    if (closed[0] || saved[0] || visited == null) return;
++                    if (isEntrySignin(visited)) {
++                        fail[0].run(); // 엔트리 세션 만료
 +                        return;
 +                    }
-+                    if (importScript.isEmpty()) return;
-+                    autoStarted[0] = true;
-+                    java.util.regex.Matcher m = WS_ID.matcher(loaded == null ? "" : loaded);
-+                    startId[0] = m.find() ? m.group(1) : null;
-+                    view.evaluateJavascript(
-+                        "Promise.resolve().then(() => " + importScript + ")" +
-+                        ".then((r) => EntryLocalSave.done(JSON.stringify(r || {})))" +
-+                        ".catch(() => EntryLocalSave.done('{\"fed\":false}'));",
-+                        null
-+                    );
++                    if (overwriting[0]) return; // 덮어쓰기는 페이지를 옮기지 않는다 (결과는 doneOverwrite 로)
++                    java.util.regex.Matcher m = WS_ID.matcher(visited);
++                    if (!autoStarted[0] || !m.find()) return;
++                    String id = m.group(1);
++                    if (id.equals(startId[0])) return;
++                    projectId[0] = id;
++                    saved[0] = true;
++                    main.removeCallbacks(fail[0]);
++                    main.postDelayed(finish, 300);
++                }
++
++                @Override
++                public void onLoaded(String loaded) {
++                    if (autoStarted[0] || closed[0]) return;
++                    if (isEntrySignin(loaded)) {
++                        fail[0].run();
++                        return;
++                    }
++                    if (overwriting[0]) runOverwrite.run();
++                    else if (!importScript.isEmpty()) runImport.run();
++                }
++            };
++            if (warmReadyFor(url)) {
++                // 이미 열려 있는 작업 화면 → 불러오기 없이 바로
++                if (overwriting[0]) runOverwrite.run();
++                else if (!importScript.isEmpty()) runImport.run();
++            } else if (warmLoadingUrl != null && sameWs(warmLoadingUrl, url)) {
++                // 미리 불러오는 중 → 다 불러오면 onLoaded 에서 시작
++            } else {
++                loadWarm(url);
++            }
++        });
++    }
++
++    /** run(keepWarm): 계정 작품 받아 오기 등을 작업 화면 웹뷰(warm)에서 하고 웹뷰는 그대로 둔다 */
++    private void runWarm(final PluginCall call, final String url, final String script, final int timeoutMs) {
++        main.post(() -> {
++            if (currentSaveCancel != null || warmListener != null) {
++                runFresh(call, url, script, timeoutMs);
++                return;
++            }
++            final boolean[] finished = { false };
++            final String token = UUID.randomUUID().toString();
++            final WebView web = warmWeb();
++            warmActive();
++            final Runnable timeout = () -> {
++                if (finished[0]) return;
++                finished[0] = true;
++                destroyWarm();
++                call.reject(tr("엔트리 응답이 없습니다. 인터넷 연결을 확인해 주세요.", "No response from Entry. Please check your internet connection."), "TIMEOUT");
++            };
++            warmRuns.put(token, (payload) -> {
++                if (finished[0]) return;
++                finished[0] = true;
++                main.removeCallbacks(timeout);
++                warmIdle();
++                try {
++                    JSONObject o = new JSONObject(payload);
++                    if (o.optBoolean("ok")) {
++                        JSObject r = new JSObject();
++                        r.put("json", o.optString("json", "null"));
++                        call.resolve(r);
++                    } else {
++                        call.reject(o.optString("error", tr("엔트리 처리 중 오류", "Error while processing in Entry")));
++                    }
++                } catch (Exception e) {
++                    call.reject(tr("엔트리 응답을 읽지 못했습니다.", "Could not read the response from Entry."));
 +                }
 +            });
-+            // 앱 화면 아래(맨 뒤)에 같은 크기로 붙인다 → 사용자에게는 앱의 대기 창만 보인다
-+            if (appWeb.getBackground() == null) appWeb.setBackgroundColor(Color.WHITE);
-+            host.addView(web, 0, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-+            web.loadUrl(url);
++            final Runnable start = () -> web.evaluateJavascript(
++                "Promise.resolve().then(() => " + script + ")" +
++                ".then((v) => EntryLocalBridge.done('" + token + "', JSON.stringify({ ok: true, json: JSON.stringify(v === undefined ? null : v) })))" +
++                ".catch((e) => EntryLocalBridge.done('" + token + "', JSON.stringify({ ok: false, error: String((e && e.message) || e) })));",
++                null
++            );
++            warmListener = new WarmListener() {
++                @Override
++                public void onUrl(String visited) {
++                    if (!finished[0] && isEntrySignin(visited)) {
++                        finished[0] = true;
++                        main.removeCallbacks(timeout);
++                        destroyWarm();
++                        call.reject(tr("엔트리 로그인이 만료되었습니다. 다시 로그인해 주세요.", "Your Entry login has expired. Please log in again."), "SIGNED_OUT");
++                    }
++                }
++
++                @Override
++                public void onLoaded(String loaded) {
++                    if (finished[0]) return;
++                    if (isEntrySignin(loaded)) {
++                        onUrl(loaded);
++                        return;
++                    }
++                    warmListener = null;
++                    start.run();
++                }
++            };
++            main.postDelayed(timeout, timeoutMs);
++            if (warmReadyFor(url)) {
++                warmListener = null;
++                start.run();
++            } else if (!(warmLoadingUrl != null && sameWs(warmLoadingUrl, url))) {
++                loadWarm(url);
++            }
 +        });
 +    }
 +
@@ -1473,10 +1762,10 @@ index 00000000..af7f61ba
 +}
 diff --git a/mobile/android/app/src/main/java/biz/softline/entrylocal/MainActivity.java b/mobile/android/app/src/main/java/biz/softline/entrylocal/MainActivity.java
 new file mode 100644
-index 00000000..156195fd
+index 00000000..e54bf81b
 --- /dev/null
 +++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/MainActivity.java
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,127 @@
 +package biz.softline.entrylocal;
 +
 +import android.content.Intent;
@@ -1484,6 +1773,9 @@ index 00000000..156195fd
 +import android.os.Bundle;
 +import android.util.Log;
 +import android.view.Display;
++import android.view.View;
++import android.view.WindowInsets;
++import android.view.WindowInsetsController;
 +import android.view.WindowManager;
 +import android.webkit.WebSettings;
 +import android.webkit.WebView;
@@ -1503,6 +1795,8 @@ index 00000000..156195fd
 +
 +        // [entry-local] 성능: 화면을 기기의 최고 주사율(90/120Hz)로
 +        requestHighestRefreshRate();
++        // [entry-local 1.1] 휴대폰: 상태·탐색 막대를 숨겨 편집기 화면을 크게 (가장자리를 쓸어 넘기면 잠깐 나타남)
++        enterImmersiveOnPhone();
 +
 +        if (bridge != null && bridge.getWebView() != null) {
 +            WebView webView = bridge.getWebView();
@@ -1538,6 +1832,44 @@ index 00000000..156195fd
 +
 +    @Override
 +    public void IHaveModifiedTheMainActivityForTheUseWithSocialLoginPlugin() {}
++
++    /** 휴대폰(짧은 변 600dp 미만)인가 — 태블릿은 막대를 그대로 둔다 */
++    private boolean isPhone() {
++        return getResources().getConfiguration().smallestScreenWidthDp < 600;
++    }
++
++    @Override
++    public void onWindowFocusChanged(boolean hasFocus) {
++        super.onWindowFocusChanged(hasFocus);
++        if (hasFocus) {
++            enterImmersiveOnPhone(); // 다른 창(로그인 등)에서 돌아오면 다시 숨긴다
++        }
++    }
++
++    @SuppressWarnings("deprecation")
++    private void enterImmersiveOnPhone() {
++        if (!isPhone()) {
++            return;
++        }
++        try {
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
++                WindowInsetsController controller = getWindow().getInsetsController();
++                if (controller != null) {
++                    controller.hide(WindowInsets.Type.systemBars());
++                    controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
++                }
++            } else {
++                getWindow().getDecorView().setSystemUiVisibility(
++                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
++                        | View.SYSTEM_UI_FLAG_FULLSCREEN
++                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
++                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
++                );
++            }
++        } catch (Exception ignored) {
++            // 지원하지 않는 기기는 그대로
++        }
++    }
 +
 +    private void requestHighestRefreshRate() {
 +        try {
@@ -5221,19 +5553,19 @@ index 00000000..0dd92867
 +}
 diff --git a/mobile/package-lock.json b/mobile/package-lock.json
 new file mode 100644
-index 00000000..06cba905
+index 00000000..c479ad3c
 --- /dev/null
 +++ b/mobile/package-lock.json
 @@ -0,0 +1,2198 @@
 +{
 +  "name": "entry-local-mobile",
-+  "version": "2.1.36",
++  "version": "1.1.0",
 +  "lockfileVersion": 3,
 +  "requires": true,
 +  "packages": {
 +    "": {
 +      "name": "entry-local-mobile",
-+      "version": "2.1.36",
++      "version": "1.1.0",
 +      "dependencies": {
 +        "@breezystack/lamejs": "1.2.7",
 +        "@capacitor/android": "8.5.3",
@@ -7425,14 +7757,14 @@ index 00000000..06cba905
 +}
 diff --git a/mobile/package.json b/mobile/package.json
 new file mode 100644
-index 00000000..bb91a8ff
+index 00000000..8b13b415
 --- /dev/null
 +++ b/mobile/package.json
 @@ -0,0 +1,26 @@
 +{
 +  "name": "entry-local-mobile",
 +  "private": true,
-+  "version": "2.1.36",
++  "version": "1.1.0",
 +  "description": "엔트리 로컬 안드로이드 (Capacitor)",
 +  "scripts": {
 +    "assemble": "node scripts/assemble-www.js",
@@ -8680,7 +9012,7 @@ index 00000000..86986717
 +}
 diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
 new file mode 100644
-index 00000000..dd713721
+index 00000000..3d22ee57
 --- /dev/null
 +++ b/src/common/buildInfo.ts
 @@ -0,0 +1,22 @@
@@ -8691,8 +9023,8 @@ index 00000000..dd713721
 + *   - APP_VERSION: 사용자에게 보이는 버전 (v1.0.0 → v1.0.1 → … 큰 변경은 v1.1.0)
 + *   - ENTRY_LOCAL_BUILD: 같은 버전 안에서 어떤 패치로 빌드됐는지 구별하는 날짜 번호
 + */
-+export const APP_VERSION = '1.0.0';
-+export const ENTRY_LOCAL_BUILD = '2026.10.23-o'; // 로딩 창 엔트리봇 가운데 정렬
++export const APP_VERSION = '1.1.0';
++export const ENTRY_LOCAL_BUILD = '2026.10.24-a'; // 1.1.0: 휴대폰 지원 · 계정 저장 가속
 +
 +/** 앱 이름 (안드로이드 / Windows) */
 +export const APP_NAME_ANDROID = 'Entry for Android';
@@ -9048,10 +9380,10 @@ index 00000000..92f01770
 +}
 diff --git a/src/common/entryAccount.ts b/src/common/entryAccount.ts
 new file mode 100644
-index 00000000..714f8a76
+index 00000000..4969b071
 --- /dev/null
 +++ b/src/common/entryAccount.ts
-@@ -0,0 +1,400 @@
+@@ -0,0 +1,419 @@
 +/**
 + * [entry-local] 엔트리(playentry.org) 계정 — Windows·안드로이드 공통 상수
 + *
@@ -9257,8 +9589,16 @@ index 00000000..714f8a76
 +
 +export const ENTRY_IMPORT_LABEL = '오프라인 작품 불러오기';
 +
++/**
++ * 작품 파일(.ent) 내용을 스크립트에 넣는 방법
++ *  - 글자 그대로(base64): Windows
++ *  - 식(expression): 안드로이드 — 큰 작품을 스크립트에 몇 번씩 넣어 보내지 않도록, 페이지가 앱에서 직접 받아 온다
++ */
++export type EntSource = string | { expr: string };
++const entJs = (src: EntSource) => (typeof src === 'string' ? JSON.stringify(src) : src.expr);
++
 +/** 작업 화면에서 실행: 작품(.ent, base64)을 '오프라인 작품 불러오기'로 넣는다 → { fed, how } (Promise) */
-+export function autoImportScript(entBase64: string) {
++export function autoImportScript(entBase64: EntSource) {
 +    return `(async () => {
 +  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 +  const started = Date.now();
@@ -9268,7 +9608,7 @@ index 00000000..714f8a76
 +    await sleep(400);
 +  }
 +  await sleep(1500); // 편집기가 준비된 직후에는 메뉴 버튼이 아직 반응하지 않기도 한다
-+  const bin = atob(${JSON.stringify(entBase64)});
++  const bin = atob(${entJs(entBase64)});
 +  const bytes = new Uint8Array(bin.length);
 +  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
 +  const file = new File([bytes], 'entry-local-project.ent', { type: 'application/octet-stream' });
@@ -9323,7 +9663,7 @@ index 00000000..714f8a76
 + *  3) 임시 작품은 지운다 (DELETE_PROJECT)
 + * 결과 { fed, saved, reason? } — fallback: true 면 덮어쓸 수 없는 작품(남의 작품·없어진 작품) → 새 작품으로 저장
 + */
-+export function overwriteScript(entBase64: string, targetId: string) {
++export function overwriteScript(entBase64: EntSource, targetId: string) {
 +    return `(async () => {
 +  ${HEADERS_FN}
 +  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -9336,40 +9676,48 @@ index 00000000..714f8a76
 +  const updatedOf = async (id) => {
 +    try { const d = await gql('SELECT_PROJECT', 'query SELECT_PROJECT($id: ID! $groupId: ID) { project(id: $id, groupId: $groupId) { id updated } }', { id }); return d.project && d.project.updated; } catch (e) { return undefined; }
 +  };
++  const findCtrl = () => {
++    const root = document.getElementById('__next');
++    const key = root && Object.keys(root).find((k) => k.startsWith('__reactContainer'));
++    let start = key && root[key];
++    if (start && start.stateNode && start.stateNode.current) start = start.stateNode.current;
++    const stack = [start];
++    for (let n = 0; stack.length && n < 50000; n++) {
++      const f = stack.pop();
++      if (!f) continue;
++      const v = f.memoizedProps && f.memoizedProps.value;
++      if (v && typeof v === 'object' && typeof v.saveProject === 'function' && typeof v.reloadEntry === 'function') return v;
++      if (f.child) stack.push(f.child);
++      if (f.sibling) stack.push(f.sibling);
++    }
++    return null;
++  };
++  const target = ${JSON.stringify(targetId)};
++  // [1.1] 빠르게: 정해진 시간(1.5초)을 기다리지 않고, 작업 화면 관리자가 준비되는 즉시 시작한다
++  //       (이미 열려 있는 작업 화면을 다시 쓰면 바로 시작) — 작품 id 가 아직 바뀌는 중이면 잠깐 더 기다린다
 +  const t0 = Date.now();
++  let ctrl = null;
 +  while (Date.now() - t0 < 60000) {
 +    const E = window.Entry;
-+    if (E && E.container && E.playground && E.engine) break;
-+    await sleep(400);
++    if (E && E.container && E.playground && E.engine) {
++      ctrl = findCtrl();
++      if (ctrl && ctrl.isLogined !== undefined && (ctrl.projectId === target || Date.now() - t0 > 8000)) break;
++    }
++    await sleep(200);
 +  }
-+  await sleep(1500);
 +  document.querySelectorAll('.tooltipGuide .close').forEach((c) => { try { c.click(); } catch (e) {} });
-+  const root = document.getElementById('__next');
-+  const key = root && Object.keys(root).find((k) => k.startsWith('__reactContainer'));
-+  let start = key && root[key];
-+  if (start && start.stateNode && start.stateNode.current) start = start.stateNode.current;
-+  let ctrl = null;
-+  const stack = [start];
-+  for (let n = 0; stack.length && n < 50000 && !ctrl; n++) {
-+    const f = stack.pop();
-+    if (!f) continue;
-+    const v = f.memoizedProps && f.memoizedProps.value;
-+    if (v && typeof v === 'object' && typeof v.saveProject === 'function' && typeof v.reloadEntry === 'function') ctrl = v;
-+    if (f.child) stack.push(f.child);
-+    if (f.sibling) stack.push(f.sibling);
-+  }
 +  if (!ctrl) return { fed: false, reason: 'no-workspace' };
 +  if (!ctrl.isLogined) return { fed: false, reason: 'login' };
-+  const target = ${JSON.stringify(targetId)};
 +  // 지금 열린 작품이 내 작품(targetId)인지 확인 — 아니면 덮어쓰지 않고 새 작품으로 저장
 +  if (ctrl.projectId !== target) return { fed: false, fallback: true, reason: 'not-found' };
 +  const owner = ctrl.projectData && ctrl.projectData.user;
 +  const me = ctrl.user;
 +  if (owner && me && (owner.id || owner._id) && (owner.id || owner._id) !== (me.id || me._id)) return { fed: false, fallback: true, reason: 'not-mine' };
-+  const before = await updatedOf(target);
++  // 저장 전 수정 시각은 올리기와 동시에 받아 둔다 (기다리는 시간 줄이기)
++  const beforeP = updatedOf(target);
 +
 +  // 1) 올리기
-+  const bin = atob(${JSON.stringify(entBase64)});
++  const bin = atob(${entJs(entBase64)});
 +  const bytes = new Uint8Array(bin.length);
 +  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
 +  const form = new FormData();
@@ -9405,10 +9753,13 @@ index 00000000..714f8a76
 +    const alert0 = ctrl.alertProjectSaveError;
 +    ctrl.alertProjectSaveError = function () { saveError = true; return alert0 && alert0.apply(this, arguments); };
 +    await ctrl.reloadEntry(content);
-+    await sleep(800);
++    await sleep(400);
 +    await ctrl.saveProject();
 +    ctrl.alertProjectSaveError = alert0;
-+    const after = await updatedOf(target);
++    const before = await beforeP;
++    // 저장 확인과 임시 작품 지우기를 동시에
++    const [after] = await Promise.all([updatedOf(target), removeTemp()]);
++    tempId = undefined;
 +    const saved = !saveError && (before === undefined || after === undefined || after !== before);
 +    return { fed: true, saved, reason: saved ? undefined : 'save-failed' };
 +  } finally {
@@ -10018,10 +10369,10 @@ index fd44b8ce..841f484e 100644
          }
 diff --git a/src/main/entryAccount.ts b/src/main/entryAccount.ts
 new file mode 100644
-index 00000000..8d188c62
+index 00000000..48e05601
 --- /dev/null
 +++ b/src/main/entryAccount.ts
-@@ -0,0 +1,612 @@
+@@ -0,0 +1,799 @@
 +import { lt, setMainLang } from '../common/localLang';
 +import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
 +import path from 'path';
@@ -10212,6 +10563,7 @@ index 00000000..8d188c62
 +
 +async function logout() {
 +    saveUser(undefined);
++    destroyWarm();
 +    try {
 +        await session.fromPartition(PARTITION).clearStorageData();
 +    } catch (e) {
@@ -10312,10 +10664,38 @@ index 00000000..8d188c62
 +
 +async function loadProject(projectId: string, name: string) {
 +    requireUser();
-+    const result = await runInEntry<{ name: string; base64: string }>(
-+        entryWorkspaceUrl(projectId, BASE),
-+        exportProjectScript(name || lt('엔트리 작품', 'Entry project'))
-+    );
++    // [1.1] 작업 화면 창(warm)에서 받아 오고 창은 그대로 둔다 → 이 작품을 다시 계정에 저장할 때 바로 저장
++    let result: { name: string; base64: string };
++    if (saveInProgress) {
++        result = await runInEntry<{ name: string; base64: string }>(
++            entryWorkspaceUrl(projectId, BASE),
++            exportProjectScript(name || lt('엔트리 작품', 'Entry project'))
++        );
++    } else {
++        const ok = await loadWarm(entryWorkspaceUrl(projectId, BASE));
++        const w = warm;
++        if (!ok || !w || w.win.isDestroyed()) {
++            const signedOut = !!w && !w.win.isDestroyed() && !isEntryPageAfterLogin(w.win.webContents.getURL(), BASE);
++            destroyWarm();
++            if (signedOut) {
++                saveUser(undefined);
++                throw new Error(lt('엔트리 로그인이 만료되었습니다. 다시 로그인해 주세요.', 'Your Entry login has expired. Please log in again.'));
++            }
++            throw new Error(lt('엔트리 응답이 없습니다. 인터넷 연결을 확인해 주세요.', 'No response from Entry. Please check your internet connection.'));
++        }
++        try {
++            result = await Promise.race([
++                w.win.webContents.executeJavaScript(exportProjectScript(name || lt('엔트리 작품', 'Entry project')), true),
++                new Promise<never>((_, reject) =>
++                    setTimeout(() => reject(new Error(lt('엔트리 응답이 없습니다. 인터넷 연결을 확인해 주세요.', 'No response from Entry. Please check your internet connection.'))), 90000)
++                ),
++            ]);
++            setWarmActive(w, false);
++        } catch (e) {
++            destroyWarm();
++            throw e;
++        }
++    }
 +    const tmp = path.join(tmpDir(), `${projectId.replace(/[^a-z0-9]/gi, '')}.ent`);
 +    await fs.outputFile(tmp, Buffer.from(result.base64, 'base64'));
 +    try {
@@ -10337,57 +10717,196 @@ index 00000000..8d188c62
 + * 결과: { projectId, saved, failed }
 + */
 +let saveInProgress: Promise<{ projectId?: string; saved?: boolean; failed?: boolean }> | undefined;
-+/** 엔트리 계정 작품(projectId)에 덮어쓰기 — 숨은 창에서 그 작품의 작업 화면을 열고 overwriteScript 실행 */
-+async function overwriteOnSite(
-+    entBase64: string,
-+    projectId: string
-+): Promise<{ saved?: boolean; fallback?: boolean; cancelled?: boolean; reason?: string }> {
++
++/* ------------------------------------------------------------------ */
++/* [1.1] 계정 저장 가속 — 엔트리 작업 화면 창을 다시 쓴다                  */
++/* 저장할 때마다 보이지 않는 창에 엔트리 작업 화면(수 MB)을 새로 불러오던 것이 */
++/* 시간의 대부분이었다. 저장이 끝난 창을 닫지 않고 그 작품 화면 그대로 두었다가 */
++/* 같은 작품을 다시 저장하면 불러오기 없이 바로 저장한다.                    */
++/*  - 계정 작품을 열었거나 저장 메뉴를 열면 미리 불러 둔다 (prewarm)          */
++/*  - 10분 동안 저장이 없거나, 로그아웃·실패·취소·앱 종료 때 닫는다          */
++/*  - 쉬는 동안은 창의 동작을 늦춰(throttle) 컴퓨터 자원을 거의 쓰지 않는다   */
++/* ------------------------------------------------------------------ */
++const WARM_IDLE_MS = 10 * 60 * 1000;
++type Warm = {
++    win: BrowserWindow;
++    url?: string; // 다 불러온 작업 화면 주소
++    loading?: Promise<boolean>;
++    idleTimer?: ReturnType<typeof setTimeout>;
++};
++let warm: Warm | undefined;
++
++function destroyWarm() {
++    const w = warm;
++    warm = undefined;
++    if (w) {
++        w.idleTimer && clearTimeout(w.idleTimer);
++        if (!w.win.isDestroyed()) {
++            w.win.destroy();
++        }
++    }
++}
++app.on('before-quit', destroyWarm);
++
++function warmWindow(): Warm {
++    if (warm && !warm.win.isDestroyed()) {
++        return warm;
++    }
 +    const win = new BrowserWindow({
 +        show: false,
 +        width: 1280,
 +        height: 800,
 +        webPreferences: { partition: PARTITION, contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false },
 +    });
++    const w: Warm = { win };
++    win.on('closed', () => {
++        if (warm === w) {
++            warm = undefined;
++        }
++    });
++    // 다 불러온 주소를 기억 (엔트리가 다른 작품 화면으로 이동해도 그 주소로)
++    win.webContents.on('did-finish-load', () => {
++        if (warm === w && !win.isDestroyed()) {
++            w.url = win.webContents.getURL();
++        }
++    });
++    win.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => {
++        if (isMainFrame && !isInPlace && warm === w) {
++            w.url = undefined; // 새로 불러오는 중
++        }
++    });
++    warm = w;
++    return w;
++}
++
++function setWarmActive(w: Warm, active: boolean) {
++    w.idleTimer && clearTimeout(w.idleTimer);
++    w.idleTimer = undefined;
++    if (w.win.isDestroyed()) {
++        return;
++    }
 +    try {
-+        return await new Promise((resolve) => {
-+            let finished = false;
-+            const finish = (r: { saved?: boolean; fallback?: boolean; cancelled?: boolean; reason?: string }) => {
-+                if (finished) {
-+                    return;
-+                }
-+                finished = true;
-+                clearTimeout(timer);
-+                resolve(r);
-+            };
-+            const timer = setTimeout(() => finish({ reason: 'timeout' }), 120000);
-+            cancelCurrentSave = () => finish({ cancelled: true });
-+            if (cancelRequested) {
-+                finish({ cancelled: true });
++        w.win.webContents.setBackgroundThrottling(!active);
++    } catch (e) {
++        // 지원하지 않는 버전
++    }
++    if (!active) {
++        w.idleTimer = setTimeout(() => warm === w && destroyWarm(), WARM_IDLE_MS);
++    }
++}
++
++const sameWs = (a?: string, b?: string) => {
++    const ia = a && projectIdFromWorkspaceUrl(a);
++    const ib = b && projectIdFromWorkspaceUrl(b);
++    return !!ia && ia === ib;
++};
++
++/** 작업 화면 창에 url 을 (이미 열려 있지 않으면) 불러온다 → 다 불러왔으면 true */
++function loadWarm(url: string, timeoutMs = 90000): Promise<boolean> {
++    const w = warmWindow();
++    setWarmActive(w, true);
++    if (w.url && sameWs(w.url, url) && isEntryPageAfterLogin(w.url, BASE)) {
++        return Promise.resolve(true);
++    }
++    if (w.loading && w.win.webContents.getURL() && sameWs(w.win.webContents.getURL(), url)) {
++        return w.loading;
++    }
++    const p = new Promise<boolean>((resolve) => {
++        let done = false;
++        const finish = (ok: boolean) => {
++            if (done) {
 +                return;
 +            }
-+            win.webContents.on('did-navigate', (_e, url) => {
-+                if (!isEntryPageAfterLogin(url, BASE)) {
++            done = true;
++            clearTimeout(timer);
++            w.win.isDestroyed() || w.win.webContents.removeListener('did-finish-load', onLoad);
++            resolve(ok);
++        };
++        const onLoad = () => finish(!w.win.isDestroyed() && isEntryPageAfterLogin(w.win.webContents.getURL(), BASE));
++        const timer = setTimeout(() => finish(false), timeoutMs);
++        w.win.webContents.on('did-finish-load', onLoad);
++        w.win.loadURL(url).catch(() => undefined);
++        w.win.once('closed', () => finish(false));
++    }).finally(() => {
++        if (w.loading === p) {
++            w.loading = undefined;
++        }
++    });
++    w.loading = p;
++    return p;
++}
++
++/** [1.1] 저장 메뉴를 열었거나 계정 작품을 열었을 때 작업 화면을 미리 불러 둔다 */
++async function prewarm(projectId?: string) {
++    ensureLoaded();
++    if (!user || saveInProgress) {
++        return;
++    }
++    const url = entryWorkspaceUrl(projectId && /^[0-9a-f]{24}$/i.test(projectId) ? projectId : undefined, BASE);
++    const ok = await loadWarm(url);
++    if (warm && !saveInProgress) {
++        if (!ok && warm.win && !warm.win.isDestroyed() && !isEntryPageAfterLogin(warm.win.webContents.getURL(), BASE)) {
++            saveUser(undefined); // 엔트리 세션 만료
++            destroyWarm();
++            return;
++        }
++        setWarmActive(warm, false);
++    }
++}
++
++/** 엔트리 계정 작품(projectId)에 덮어쓰기 — 작업 화면 창에서 그 작품을 열고(이미 열려 있으면 그대로) overwriteScript 실행 */
++async function overwriteOnSite(
++    entBase64: string,
++    projectId: string
++): Promise<{ saved?: boolean; fallback?: boolean; cancelled?: boolean; reason?: string }> {
++    const started = Date.now();
++    const result = await new Promise<{ saved?: boolean; fallback?: boolean; cancelled?: boolean; reason?: string }>((resolve) => {
++        let finished = false;
++        const finish = (r: { saved?: boolean; fallback?: boolean; cancelled?: boolean; reason?: string }) => {
++            if (finished) {
++                return;
++            }
++            finished = true;
++            clearTimeout(timer);
++            resolve(r);
++        };
++        const timer = setTimeout(() => finish({ reason: 'timeout' }), 120000);
++        cancelCurrentSave = () => finish({ cancelled: true });
++        if (cancelRequested) {
++            finish({ cancelled: true });
++            return;
++        }
++        (async () => {
++            const ok = await loadWarm(entryWorkspaceUrl(projectId, BASE));
++            const w = warm;
++            if (finished) {
++                return;
++            }
++            if (!ok || !w || w.win.isDestroyed()) {
++                if (w && !w.win.isDestroyed() && !isEntryPageAfterLogin(w.win.webContents.getURL(), BASE)) {
 +                    saveUser(undefined); // 엔트리 세션 만료
 +                    finish({ reason: 'signed-out' });
++                } else {
++                    finish({ reason: 'load' });
 +                }
-+            });
-+            win.webContents.once('did-finish-load', async () => {
-+                try {
-+                    const r = await win.webContents.executeJavaScript(overwriteScript(entBase64, projectId), true);
-+                    logger.info(`엔트리 계정 덮어쓰기: ${JSON.stringify(r)}`);
-+                    finish({ saved: !!(r && r.saved), fallback: !!(r && r.fallback), reason: r && r.reason });
-+                } catch (e) {
-+                    logger.warn(`엔트리 계정 덮어쓰기 실패: ${(e as Error).message}`);
-+                    finish({ reason: 'script' });
-+                }
-+            });
-+            win.loadURL(entryWorkspaceUrl(projectId, BASE)).catch(() => finish({ reason: 'load' }));
-+        });
-+    } finally {
-+        if (!win.isDestroyed()) {
-+            win.destroy();
-+        }
++                return;
++            }
++            try {
++                const r = await w.win.webContents.executeJavaScript(overwriteScript(entBase64, projectId), true);
++                logger.info(`엔트리 계정 덮어쓰기: ${JSON.stringify(r)} (${Date.now() - started}ms)`);
++                finish({ saved: !!(r && r.saved), fallback: !!(r && r.fallback), reason: r && r.reason });
++            } catch (e) {
++                logger.warn(`엔트리 계정 덮어쓰기 실패: ${(e as Error).message}`);
++                finish({ reason: 'script' });
++            }
++        })();
++    });
++    if (result.saved && warm) {
++        setWarmActive(warm, false); // 다음 저장을 위해 그대로 둔다
++    } else {
++        destroyWarm(); // 실패·취소: 하던 일을 멈추고 다음에는 새로
 +    }
++    return result;
 +}
 +
 +/** [entry-local] 진행 중인 계정 저장을 멈춘다 (대기 창의 [취소]) */
@@ -10424,74 +10943,92 @@ index 00000000..8d188c62
 +            return {};
 +        }
 +
-+        const win = new BrowserWindow({
-+            show: false,
-+            width: 1280,
-+            height: 800,
-+            webPreferences: {
-+                partition: PARTITION,
-+                contextIsolation: true,
-+                nodeIntegration: false,
-+                sandbox: true,
-+                backgroundThrottling: false,
-+            },
-+        });
-+        try {
-+            return await new Promise<{ projectId?: string; saved?: boolean; failed?: boolean }>((resolve) => {
-+                let startId: string | undefined;
-+                let started = false;
-+                let finished = false;
-+                const finish = (r: { projectId?: string; saved?: boolean; failed?: boolean }) => {
-+                    if (finished) {
-+                        return;
-+                    }
-+                    finished = true;
-+                    clearTimeout(timer);
-+                    resolve(r);
-+                };
-+                const timer = setTimeout(() => finish({ failed: true }), 90000);
-+                cancelCurrentSave = () => finish({}); // 취소: 저장도 실패도 아님
-+                if (cancelRequested) {
-+                    finish({});
++        // 새 작품으로 저장: 작업 화면 창(미리 불러 둔 /ws/new 가 있으면 그대로)에서 '오프라인 작품 불러오기'
++        const result = await new Promise<{ projectId?: string; saved?: boolean; failed?: boolean }>((resolve) => {
++            let finished = false;
++            const w = warmWindow();
++            const wc = w.win.webContents;
++            const finish = (r: { projectId?: string; saved?: boolean; failed?: boolean }) => {
++                if (finished) {
 +                    return;
 +                }
-+                const onUrl = (url: string) => {
-+                    if (!isEntryPageAfterLogin(url, BASE)) {
-+                        // 로그인 화면으로 돌려보내짐 = 엔트리 세션 만료
-+                        saveUser(undefined);
-+                        finish({ failed: true });
-+                        return;
-+                    }
-+                    const id = projectIdFromWorkspaceUrl(url);
-+                    if (started && id && id !== startId) {
-+                        // 엔트리가 새 작품을 만들고 그 작업 화면으로 이동함 = 저장 완료
-+                        finish({ projectId: id, saved: true });
-+                    }
-+                };
-+                win.webContents.on('did-navigate', (_e, url) => onUrl(url));
-+                win.webContents.on('did-navigate-in-page', (_e, url) => onUrl(url));
-+                win.webContents.once('did-finish-load', async () => {
-+                    startId = projectIdFromWorkspaceUrl(win.webContents.getURL());
-+                    started = true;
-+                    try {
-+                        const r = await win.webContents.executeJavaScript(autoImportScript(entBase64), true);
-+                        if (!r || !r.fed) {
-+                            logger.warn('엔트리 오프라인 작품 불러오기를 찾지 못함');
-+                            finish({ failed: true });
-+                        }
-+                    } catch (e) {
-+                        // 불러오기 직후 페이지가 이동하면 스크립트가 끊긴다 (정상) — 이동으로 완료를 판단
-+                    }
-+                });
-+                win.loadURL(entryWorkspaceUrl(undefined, BASE)).catch(() => finish({ failed: true }));
-+            });
-+        } finally {
-+            cancelCurrentSave = undefined;
-+            if (!win.isDestroyed()) {
-+                win.destroy();
++                finished = true;
++                clearTimeout(timer);
++                if (!w.win.isDestroyed()) {
++                    wc.removeListener('did-navigate', onNav);
++                    wc.removeListener('did-navigate-in-page', onNav);
++                }
++                resolve(r);
++            };
++            const timer = setTimeout(() => finish({ failed: true }), 90000);
++            cancelCurrentSave = () => finish({}); // 취소: 저장도 실패도 아님
++            if (cancelRequested) {
++                finish({});
++                return;
 +            }
++            let startId: string | undefined;
++            let started = false;
++            const onUrl = (url: string) => {
++                if (!isEntryPageAfterLogin(url, BASE)) {
++                    // 로그인 화면으로 돌려보내짐 = 엔트리 세션 만료
++                    saveUser(undefined);
++                    finish({ failed: true });
++                    return;
++                }
++                const id = projectIdFromWorkspaceUrl(url);
++                if (started && id && id !== startId) {
++                    // 엔트리가 새 작품을 만들고 그 작업 화면으로 이동함 = 저장 완료
++                    finish({ projectId: id, saved: true });
++                }
++            };
++            const onNav = (_e: any, url: string) => onUrl(url);
++            wc.on('did-navigate', onNav);
++            wc.on('did-navigate-in-page', onNav);
++            (async () => {
++                const newUrl = entryWorkspaceUrl(undefined, BASE);
++                // 미리 불러 둔 창이 이미 '새 작품' 화면이면 그대로, 아니면 새로 불러온다
++                const cur = w.url || '';
++                let ok = true;
++                if (!(cur && !projectIdFromWorkspaceUrl(cur) && /\/ws\/new/.test(cur))) {
++                    ok = await new Promise<boolean>((res) => {
++                        const onLoad = () => res(true);
++                        wc.once('did-finish-load', onLoad);
++                        setWarmActive(w, true);
++                        w.win.loadURL(newUrl).catch(() => res(false));
++                    });
++                } else {
++                    setWarmActive(w, true);
++                }
++                if (finished) {
++                    return;
++                }
++                if (!ok) {
++                    finish({ failed: true });
++                    return;
++                }
++                startId = projectIdFromWorkspaceUrl(wc.getURL());
++                started = true;
++                try {
++                    const r = await wc.executeJavaScript(autoImportScript(entBase64), true);
++                    if (!r || !r.fed) {
++                        logger.warn('엔트리 오프라인 작품 불러오기를 찾지 못함');
++                        finish({ failed: true });
++                    }
++                } catch (e) {
++                    // 불러오기 직후 페이지가 이동하면 스크립트가 끊긴다 (정상) — 이동으로 완료를 판단
++                }
++            })();
++        });
++        cancelCurrentSave = undefined;
++        if (result.saved && warm) {
++            // 창은 새 작품 화면으로 옮겨 가는 중 → 다 불러오면 다음 저장(덮어쓰기)에 그대로 쓴다
++            setWarmActive(warm, false);
++        } else {
++            destroyWarm();
 +        }
++        return result;
 +    })().finally(() => {
++        cancelCurrentSave = undefined;
 +        saveInProgress = undefined;
 +    });
 +    return saveInProgress;
@@ -10609,6 +11146,7 @@ index 00000000..8d188c62
 +ipcMain.handle('entry:load', wrap((projectId, name) => loadProject(projectId, name)));
 +ipcMain.handle('entry:saveViaSite', wrap((project, options) => saveViaSite(project, options)));
 +ipcMain.handle('entry:share', wrap((projectId) => shareProject(projectId)));
++ipcMain.handle('entry:prewarm', wrap((projectId) => prewarm(projectId).catch(() => undefined)));
 +ipcMain.handle(
 +    'entry:cancelSave',
 +    wrap(async () => {
@@ -11444,7 +11982,7 @@ index 0fa6192c..3f7d4bca 100644
 +    }
 +}
 diff --git a/src/renderer/components/header.tsx b/src/renderer/components/header.tsx
-index e7ca0a84..c7826b0e 100644
+index e7ca0a84..4af6a67e 100644
 --- a/src/renderer/components/header.tsx
 +++ b/src/renderer/components/header.tsx
 @@ -12,6 +12,25 @@ import ImportToggleHelper from '../helper/importToggleHelper';
@@ -11473,16 +12011,17 @@ index e7ca0a84..c7826b0e 100644
  
  const FoundationLabel = styled.span`
      float: left;
-@@ -33,6 +52,8 @@ interface IProps extends IReduxDispatch, IReduxState {
+@@ -33,6 +52,9 @@ interface IProps extends IReduxDispatch, IReduxState {
      onProgramLanguageChanged: (key: string) => void;
      onLoadProject: () => void;
      onReloadProject: () => void;
 +    onPerformanceChange: (key: 'boost' | 'turbo' | 'fastEngine') => void; // [entry-local]
++    onSaveMenuOpen?: () => void; // [entry-local 1.1] 저장 메뉴를 열면 엔트리 작업 화면을 미리 불러 둔다
 +    onAccountAction: (key: AccountAction) => void; // [entry-local] 구글 드라이브·엔트리 계정
      programLanguageMode: string;
      executionStatus: {
          canRedo: boolean;
-@@ -44,6 +65,167 @@ type DropDownItemPair = [string | ReactElement, string];
+@@ -44,6 +66,167 @@ type DropDownItemPair = [string | ReactElement, string];
  
  class Header extends Component<IProps, IState> {
      dropdownList: any;
@@ -11650,7 +12189,7 @@ index e7ca0a84..c7826b0e 100644
  
      constructor(props: Readonly<IProps>) {
          super(props);
-@@ -63,15 +245,54 @@ class Header extends Component<IProps, IState> {
+@@ -63,15 +246,54 @@ class Header extends Component<IProps, IState> {
      get fileList(): DropDownItemPair[] {
          return [
              [RendererUtils.getLang('Workspace.file_new'), 'new'],
@@ -11709,7 +12248,7 @@ index e7ca0a84..c7826b0e 100644
      }
  
      get helpList(): DropDownItemPair[] {
-@@ -84,6 +305,7 @@ class Header extends Component<IProps, IState> {
+@@ -84,6 +306,7 @@ class Header extends Component<IProps, IState> {
                  ? [RendererUtils.getLang('Workspace.hardware_guide'), 'help_hardware']
                  : [RendererUtils.getLang('Workspace.robot_guide'), 'help_robot'],
              [RendererUtils.getLang('Workspace.python_guide'), 'help_python'],
@@ -11717,7 +12256,7 @@ index e7ca0a84..c7826b0e 100644
          ];
      }
  
-@@ -102,6 +324,17 @@ class Header extends Component<IProps, IState> {
+@@ -102,6 +325,17 @@ class Header extends Component<IProps, IState> {
          ];
      }
  
@@ -11735,7 +12274,17 @@ index e7ca0a84..c7826b0e 100644
      // noti : 가지고 있는 다국어 종류는 4종류이지만, 운영빌드에서는 관리중인 2종류만 제공
      get languageList(): DropDownItemPair[] {
          return [
-@@ -192,6 +425,12 @@ class Header extends Component<IProps, IState> {
+@@ -122,6 +356,9 @@ class Header extends Component<IProps, IState> {
+     }
+ 
+     handleDropdownClick(type?: string) {
++        if (type === 'save' && this.state.dropdownType !== 'save' && this.props.onSaveMenuOpen) {
++            this.props.onSaveMenuOpen();
++        }
+         this.setState((state) => {
+             const { dropdownType } = state;
+             return {
+@@ -192,6 +429,12 @@ class Header extends Component<IProps, IState> {
              case 'language':
                  this.handleChangeLanguage(item);
                  break;
@@ -11748,7 +12297,7 @@ index e7ca0a84..c7826b0e 100644
          }
      }
  
-@@ -205,6 +444,10 @@ class Header extends Component<IProps, IState> {
+@@ -205,6 +448,10 @@ class Header extends Component<IProps, IState> {
  
      handleHelpClick(item: DropDownItemPair) {
          const key = item[1];
@@ -11759,7 +12308,7 @@ index e7ca0a84..c7826b0e 100644
          if (key === 'help_block') {
              Entry.dispatchEvent('showBlockHelper');
          } else {
-@@ -277,32 +520,13 @@ class Header extends Component<IProps, IState> {
+@@ -277,32 +524,13 @@ class Header extends Component<IProps, IState> {
                  </div>
                  {!isValidProduct && (
                      <div className="invalidate_check_box">
@@ -11794,7 +12343,7 @@ index e7ca0a84..c7826b0e 100644
                          {
                              // 새로만들기, 불러오기
                              <div className={'work_space'}>
-@@ -393,9 +617,33 @@ class Header extends Component<IProps, IState> {
+@@ -393,9 +621,33 @@ class Header extends Component<IProps, IState> {
                          </div>
                      </div>
  
@@ -11831,7 +12380,7 @@ index e7ca0a84..c7826b0e 100644
                              <div className={'work_space'}>
                                  <a
                                      className={`link_workspace_text text_work_space  ${
-@@ -410,28 +658,105 @@ class Header extends Component<IProps, IState> {
+@@ -410,28 +662,105 @@ class Header extends Component<IProps, IState> {
                                  </a>
                                  {this.makeDropdown('mode', this.modeList)}
                              </div>
@@ -11979,7 +12528,7 @@ index eb89ad9b..baaa8a44 100644
      return (
          <div>
 diff --git a/src/renderer/components/workspace.tsx b/src/renderer/components/workspace.tsx
-index 32eb38dd..90ee8f55 100644
+index 32eb38dd..af0486d3 100644
 --- a/src/renderer/components/workspace.tsx
 +++ b/src/renderer/components/workspace.tsx
 @@ -1,5 +1,5 @@
@@ -11989,7 +12538,7 @@ index 32eb38dd..90ee8f55 100644
  import './workspace.scss';
  import '../resources/styles/fonts.scss';
  import { connect } from 'react-redux';
-@@ -23,6 +23,59 @@ import { IMapDispatchToProps, IMapStateToProps } from '../store';
+@@ -23,6 +23,60 @@ import { IMapDispatchToProps, IMapStateToProps } from '../store';
  import DragAndDropContainer from './DragAndDropContainer';
  import EntryModalHelper from '../helper/entry/entryModalHelper';
  import ipcRendererHelper from '../helper/ipcRendererHelper';
@@ -12030,6 +12579,7 @@ index 32eb38dd..90ee8f55 100644
 +import { startEditorLabels } from '../helper/editorLabels';
 +import { installBlockMenuOrder } from '../helper/blockMenuOrder';
 +import { installBackpack } from '../helper/backpack';
++import { installPaintRoom } from '../helper/paintRoom';
 +import { installInputCaretFix } from '../helper/inputCaretFix';
 +import { installTouchSliders } from '../helper/touchSliders';
 +import { lt, setMainLang, currentLang } from '../../common/localLang';
@@ -12049,7 +12599,7 @@ index 32eb38dd..90ee8f55 100644
  
  interface IProps extends IReduxDispatch, IReduxState {}
  
-@@ -34,9 +87,38 @@ class Workspace extends Component<IProps> {
+@@ -34,9 +88,38 @@ class Workspace extends Component<IProps> {
      private isFirstRender = true;
      private isSavingCanvasData = false;
      private isSaveProject = false;
@@ -12089,7 +12639,7 @@ index 32eb38dd..90ee8f55 100644
          libDir: '../../../node_modules',
          defaultDir: '../../renderer/resources',
          entryDir: '/entry-js',
-@@ -60,7 +142,15 @@ class Workspace extends Component<IProps> {
+@@ -60,7 +143,15 @@ class Workspace extends Component<IProps> {
      };
  
      get initOption() {
@@ -12106,7 +12656,7 @@ index 32eb38dd..90ee8f55 100644
      }
  
      constructor(props: Readonly<IProps>) {
-@@ -86,7 +176,14 @@ class Workspace extends Component<IProps> {
+@@ -86,7 +177,14 @@ class Workspace extends Component<IProps> {
      }
  
      componentDidMount() {
@@ -12122,7 +12672,7 @@ index 32eb38dd..90ee8f55 100644
          setTimeout(async () => {
              await this._waitFontLoad();
              try {
-@@ -108,7 +205,133 @@ class Workspace extends Component<IProps> {
+@@ -108,7 +206,133 @@ class Workspace extends Component<IProps> {
          }, 0);
      }
  
@@ -12256,7 +12806,7 @@ index 32eb38dd..90ee8f55 100644
          if (
              prevProps.common.projectName &&
              prevProps.common.projectName !== this.props.common.projectName
-@@ -139,9 +362,8 @@ class Workspace extends Component<IProps> {
+@@ -139,9 +363,12 @@ class Workspace extends Component<IProps> {
      addEntryEvents() {
          const addEventListener = Entry.addEventListener.bind(Entry);
  
@@ -12265,10 +12815,14 @@ index 32eb38dd..90ee8f55 100644
 -        });
 +        // [entry-local] 나의 보관함: 웹판과 같은 동작, 이 기기에 저장
 +        installBackpack();
++        // [1.1] 모양 탭: 그림판이 다 안 들어가면 실행 화면을 잠깐 접는다
++        installPaintRoom(() =>
++            notify(lt('모양 편집기', 'Shape editor'), lt('그림판이 다 보이도록 실행 화면을 잠깐 접었어요. 다른 탭으로 가면 다시 펼쳐져요.', 'The stage is folded so the whole editor fits. It opens again when you switch tabs.'))
++        );
          // 교과형에서 하드웨어가 바뀔때 마다 카테고리 변화
          addEventListener('hwChanged', this.handleHardwareChange);
          // 하드웨어 다운로드 탭에서 다운로드 처리
-@@ -162,6 +384,14 @@ class Workspace extends Component<IProps> {
+@@ -162,6 +389,14 @@ class Workspace extends Component<IProps> {
          addEventListener('saveAsWorkspace', () => {
              this.handleSaveAction('saveAs');
          });
@@ -12283,7 +12837,7 @@ index 32eb38dd..90ee8f55 100644
          addEventListener('saveCanvasImage', (data: any) => {
              this.handleCanvasImageSave(data);
          });
-@@ -373,6 +603,10 @@ class Workspace extends Component<IProps> {
+@@ -373,6 +608,10 @@ class Workspace extends Component<IProps> {
          const project = Entry.exportProject();
          if (project) {
              project.name = this._getProjectName();
@@ -12294,7 +12848,7 @@ index 32eb38dd..90ee8f55 100644
              Object.assign(project, option);
              LocalStorageManager.saveProject(project);
          }
-@@ -438,78 +672,486 @@ class Workspace extends Component<IProps> {
+@@ -438,78 +677,494 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -12363,6 +12917,14 @@ index 32eb38dd..90ee8f55 100644
 +     * 엔트리 작업 화면을 가려 둔 채 앱이 불러오기·저장하기를 대신 눌러 준다.
 +     * 한 번 누르면 저장이 끝날 때까지 기다렸다가(진행 화면) 자동으로 편집 화면으로 돌아온다.
 +     */
++    // [1.1] 저장 메뉴를 열면: 엔트리 계정에 로그인되어 있으면 엔트리 작업 화면을 미리 불러 둔다 (계정 저장 가속)
++    handleSaveMenuOpen = () => {
++        const state = getCloudState();
++        if (state.online && state.entry && !this.isSaveProject) {
++            entryApi.prewarm(this.entryProjectId).catch(() => undefined);
++        }
++    };
++
 +    saveToEntry = async () => {
 +        if (this.isSaveProject) {
 +            return;
@@ -12598,8 +13160,7 @@ index 32eb38dd..90ee8f55 100644
 +    _exportCurrentProject() {
 +        const { persist } = this.props;
 +        const { mode } = persist;
- 
--                // 모달 해제 후 엔트리 토스트로 저장처리
++
 +        Entry.stage.handle.setVisible(false);
 +        Entry.stage.update();
 +        const project = Entry.exportProject();
@@ -12613,7 +13174,8 @@ index 32eb38dd..90ee8f55 100644
 +        localizeProject(project);
 +        return project;
 +    }
-+
+ 
+-                // 모달 해제 후 엔트리 토스트로 저장처리
 +    saveToLocalStore = async ({ asNew, silent, name: askedName }: { asNew: boolean; silent: boolean; name?: string }) => {
 +        if (this.isSaveProject) {
 +            return;
@@ -12832,7 +13394,7 @@ index 32eb38dd..90ee8f55 100644
      };
  
      handleFileAction = async (type: string) => {
-@@ -518,6 +1160,10 @@ class Workspace extends Component<IProps> {
+@@ -518,6 +1173,10 @@ class Workspace extends Component<IProps> {
                  await RendererUtils.clearTempProject();
                  await this.loadProject();
              }
@@ -12843,7 +13405,7 @@ index 32eb38dd..90ee8f55 100644
          } else if (type === 'open_offline') {
              this._loadProjectFromFile(
                  () =>
-@@ -576,11 +1222,33 @@ class Workspace extends Component<IProps> {
+@@ -576,11 +1235,33 @@ class Workspace extends Component<IProps> {
          let projectWorkspaceMode = currentWorkspaceMode;
  
          if (project) {
@@ -12877,7 +13439,7 @@ index 32eb38dd..90ee8f55 100644
              delete this.projectSavedPath;
              delete this.projectParent;
              CommonActions.changeProjectName(RendererUtils.getDefaultProjectName());
-@@ -602,8 +1270,14 @@ class Workspace extends Component<IProps> {
+@@ -602,8 +1283,14 @@ class Workspace extends Component<IProps> {
          }
          Entry.reloadBlock();
          this.isFirstRender = false;
@@ -12892,7 +13454,7 @@ index 32eb38dd..90ee8f55 100644
          try {
              if (project) {
                  await Entry.loadExternalModules(project);
-@@ -633,9 +1307,40 @@ class Workspace extends Component<IProps> {
+@@ -633,9 +1320,40 @@ class Workspace extends Component<IProps> {
          }
      };
  
@@ -12933,11 +13495,12 @@ index 32eb38dd..90ee8f55 100644
          await this.loadProject(project);
      };
  
-@@ -717,6 +1422,8 @@ class Workspace extends Component<IProps> {
+@@ -717,6 +1435,9 @@ class Workspace extends Component<IProps> {
                          onFileAction={this.handleFileAction}
                          onReloadProject={this.reloadProject}
                          onLoadProject={this.loadProject}
 +                        onPerformanceChange={this.handlePerformanceChange}
++                        onSaveMenuOpen={this.handleSaveMenuOpen}
 +                        onAccountAction={this.handleAccountAction}
                          onProgramLanguageChanged={this.handleProgramLanguageModeChanged}
                          programLanguageMode={programLanguageMode}
@@ -13398,10 +13961,10 @@ index 00000000..8db83ebb
 +export const GOOGLE_ICON = 'data:image/png;base64,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';
 diff --git a/src/renderer/helper/cloudState.ts b/src/renderer/helper/cloudState.ts
 new file mode 100644
-index 00000000..5084efa3
+index 00000000..11a7b7c3
 --- /dev/null
 +++ b/src/renderer/helper/cloudState.ts
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,203 @@
 +/**
 + * [entry-local] 구글 드라이브·엔트리 계정 로그인 상태 + 인터넷 연결 상태
 + * 상단 메뉴·내 작품 창·저장 메뉴가 같이 쓴다.
@@ -13562,6 +14125,8 @@ index 00000000..5084efa3
 +        window.ipcInvoke<{ projectId?: string; saved?: boolean; failed?: boolean }>('entry:saveViaSite', project, options),
 +    share: (projectId: string) => window.ipcInvoke<{ shared?: boolean }>('entry:share', projectId),
 +    cancelSave: () => window.ipcInvoke<void>('entry:cancelSave'),
++    // [1.1] 엔트리 작업 화면을 미리 불러 둔다 (계정 저장을 빠르게)
++    prewarm: (projectId?: string) => window.ipcInvoke<void>('entry:prewarm', projectId),
 +};
 +
 +export const accountApi = {
@@ -15831,6 +16396,89 @@ index 00000000..6efdee16
 +        input.select();
 +    });
 +}
+diff --git a/src/renderer/helper/paintRoom.ts b/src/renderer/helper/paintRoom.ts
+new file mode 100644
+index 00000000..9455da1a
+--- /dev/null
++++ b/src/renderer/helper/paintRoom.ts
+@@ -0,0 +1,77 @@
++/**
++ * [entry-local 1.1] 모양 편집기(그림판)를 열 때 자리가 모자라면 실행 화면을 잠깐 접는다.
++ *
++ * 엔트리 그림판은 가로 920px 보다 좁아지지 않아서, 태블릿·휴대폰에서는 오른쪽 도구(모양 가져오기·확대/축소·회전·반전)와
++ * 그림판 가운데가 화면 밖으로 잘렸다. (웹판도 같음 — 실행 화면 옆 `||` 손잡이를 끌어 접어야 했다)
++ * → 모양 탭을 열 때 그림판이 다 안 들어가면 실행 화면을 접고(엔트리의 접기 기능과 같음), 다른 탭으로 가면 원래 크기로 펼친다.
++ *   사용자가 직접 손잡이로 크기를 바꾸면 그 크기를 그대로 둔다.
++ */
++const PAINT_MIN_WIDTH = 920;
++
++let collapsedFrom: number | undefined; // 접기 전 실행 화면 폭
++let noticeShown = false;
++
++function E(): any {
++    return (window as any).Entry;
++}
++
++function canvasWidth(): number | undefined {
++    const Entry = E();
++    const w = Entry && Entry.interfaceState && Entry.interfaceState.canvasWidth;
++    return typeof w === 'number' ? w : undefined;
++}
++
++function adjust(viewType: string, notice?: () => void) {
++    const Entry = E();
++    if (!Entry || typeof Entry.resizeElement !== 'function') {
++        return;
++    }
++    if (viewType === 'picture') {
++        const painter = document.querySelector('.entryPlaygroundPainter') as HTMLElement | null;
++        if (!painter || !painter.offsetParent || collapsedFrom !== undefined) {
++            return;
++        }
++        const width = canvasWidth();
++        if (painter.clientWidth >= PAINT_MIN_WIDTH || !width || width < Entry.CANVAS_MIN_WIDTH) {
++            return; // 다 들어가거나 이미 접혀 있음
++        }
++        collapsedFrom = width;
++        Entry.resizeElement({ canvasWidth: 1 }); // 엔트리 기준: 최소 폭보다 작으면 실행 화면을 접는다
++        if (!noticeShown && notice) {
++            noticeShown = true;
++            notice();
++        }
++    } else if (collapsedFrom !== undefined) {
++        const restore = collapsedFrom;
++        collapsedFrom = undefined;
++        const now = canvasWidth();
++        // 접은 그대로일 때만 펼친다 (사용자가 직접 크기를 바꿨으면 그대로)
++        if (!now || now < Entry.CANVAS_MIN_WIDTH) {
++            Entry.resizeElement({ canvasWidth: restore });
++        }
++    }
++}
++
++/** 작품을 불러올 때마다 부른다 (Entry.playground 가 새로 만들어질 수 있음) */
++export function installPaintRoom(notice?: () => void) {
++    const Entry = E();
++    const pg = Entry && Entry.playground;
++    if (!pg || pg.__elPaintRoom || typeof pg.changeViewMode !== 'function') {
++        return;
++    }
++    pg.__elPaintRoom = true;
++    collapsedFrom = undefined;
++    const original = pg.changeViewMode;
++    pg.changeViewMode = function (viewType: string, ...rest: any[]) {
++        const result = original.call(this, viewType, ...rest);
++        // 그림판이 화면에 나타난 뒤 폭을 잰다
++        setTimeout(() => {
++            try {
++                adjust(viewType, notice);
++            } catch (e) {
++                // 접기 실패는 무시 (원래대로 잘려 보일 뿐)
++            }
++        }, 60);
++        return result;
++    };
++}
 diff --git a/src/renderer/helper/practicalTheme.ts b/src/renderer/helper/practicalTheme.ts
 new file mode 100644
 index 00000000..34157d7a
@@ -17186,10 +17834,10 @@ index 00000000..211f9e78
 +}
 diff --git a/src/web/entryAccountWeb.ts b/src/web/entryAccountWeb.ts
 new file mode 100644
-index 00000000..5ee41852
+index 00000000..ce767b48
 --- /dev/null
 +++ b/src/web/entryAccountWeb.ts
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,251 @@
 +import { lt } from '../common/localLang';
 +import { registerPlugin } from '@capacitor/core';
 +import {
@@ -17221,7 +17869,8 @@ index 00000000..5ee41852
 +    logout(): Promise<void>;
 +    openUrl(options: { url: string }): Promise<void>;
 +    setLang(options: { lang: string }): Promise<void>;
-+    run(options: { url: string; script: string; timeoutMs?: number }): Promise<{ json: string }>;
++    run(options: { url: string; script: string; timeoutMs?: number; keepWarm?: boolean }): Promise<{ json: string }>;
++    prewarm(options: { url: string }): Promise<void>;
 +    openWorkspace(options: {
 +        url: string;
 +        ent: string;
@@ -17341,9 +17990,9 @@ index 00000000..5ee41852
 +    return user;
 +}
 +
-+async function run<T>(url: string, script: string, timeoutMs?: number): Promise<T> {
++async function run<T>(url: string, script: string, timeoutMs?: number, keepWarm?: boolean): Promise<T> {
 +    try {
-+        const res = await EntryAccount.run({ url, script, timeoutMs });
++        const res = await EntryAccount.run({ url, script, timeoutMs, keepWarm });
 +        return JSON.parse(res.json) as T;
 +    } catch (e) {
 +        if ((e as any) && (e as any).code === 'SIGNED_OUT') {
@@ -17361,7 +18010,8 @@ index 00000000..5ee41852
 +/** 계정 작품을 .ent 로 받아 온다 → { name, bytes } */
 +export async function entryDownloadProject(projectId: string, name: string) {
 +    requireUser();
-+    const r = await run<{ name: string; base64: string }>(entryWorkspaceUrl(projectId), exportProjectScript(name || lt('엔트리 작품', 'Entry project')));
++    // [1.1] keepWarm: 받아 온 작업 화면을 앱 뒤에 그대로 두었다가 이 작품을 계정에 저장할 때 바로 쓴다
++    const r = await run<{ name: string; base64: string }>(entryWorkspaceUrl(projectId), exportProjectScript(name || lt('엔트리 작품', 'Entry project')), undefined, true);
 +    const bin = atob(r.base64);
 +    const bytes = new Uint8Array(bin.length);
 +    for (let i = 0; i < bin.length; i++) {
@@ -17370,14 +18020,34 @@ index 00000000..5ee41852
 +    return { name: r.name, bytes };
 +}
 +
++const ENT_FROM_APP = { expr: "(window.EntryLocalSave && EntryLocalSave.getEnt()) || ''" };
++
++/** 바이트 → base64 (큰 작품도 빠르게: 브라우저 내장 변환) */
++function toBase64(bytes: Uint8Array): Promise<string> {
++    return new Promise((resolve, reject) => {
++        const reader = new FileReader();
++        reader.onload = () => {
++            const url = String(reader.result || '');
++            resolve(url.slice(url.indexOf(',') + 1));
++        };
++        reader.onerror = () => reject(reader.error);
++        reader.readAsDataURL(new Blob([bytes]));
++    });
++}
++
++/** [1.1] 저장 메뉴를 열었을 때: 엔트리 작업 화면을 앱 뒤에 미리 불러 둔다 (저장을 빠르게) */
++export async function entryPrewarm(projectId?: string) {
++    if (!isNative() || !user) {
++        return;
++    }
++    const id = projectId && /^[0-9a-f]{24}$/i.test(projectId) ? projectId : undefined;
++    await EntryAccount.prewarm({ url: entryWorkspaceUrl(id) }).catch(() => undefined);
++}
++
 +/** 반자동 저장 창 (엔트리 작업 화면 + 파일 선택 자동 입력) */
 +export async function entrySaveViaSite(bytes: Uint8Array, options: { entryProjectId?: string; name: string }) {
 +    requireUser();
-+    let bin = '';
-+    for (let i = 0; i < bytes.length; i += 0x8000) {
-+        bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
-+    }
-+    const b64 = btoa(bin);
++    const b64 = await toBase64(bytes);
 +    // 계정에서 불러온(또는 이미 계정에 저장한) 작품이면 먼저 그 작품에 덮어쓰기를 시도한다
 +    const target = options.entryProjectId && /^[0-9a-f]{24}$/i.test(options.entryProjectId) ? options.entryProjectId : '';
 +    const res = await EntryAccount.openWorkspace({
@@ -17387,8 +18057,9 @@ index 00000000..5ee41852
 +        fileName: 'entry-local-project.ent', // 영문 이름 (작품 이름은 .ent 안에 들어 있음)
 +        help: savingText(),
 +        projectId: target || undefined,
-+        overwriteScript: target ? overwriteScript(b64, target) : '',
-+        importScript: autoImportScript(b64),
++        // [1.1] 작품 파일은 한 번만 보낸다 — 스크립트는 페이지 안에서 EntryLocalSave.getEnt() 로 받아 간다
++        overwriteScript: target ? overwriteScript(ENT_FROM_APP, target) : '',
++        importScript: autoImportScript(ENT_FROM_APP),
 +        texts: saveTexts(),
 +    });
 +    return {
@@ -17840,10 +18511,10 @@ index 00000000..8ad53ede
 +}
 diff --git a/src/web/shim.ts b/src/web/shim.ts
 new file mode 100644
-index 00000000..920248ab
+index 00000000..bd4b67bc
 --- /dev/null
 +++ b/src/web/shim.ts
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,138 @@
 +import { lt } from '../common/localLang';
 +import { App } from '@capacitor/app';
 +import { initVFS } from './vfs';
@@ -17874,10 +18545,14 @@ index 00000000..920248ab
 +    meta.name = 'viewport';
 +    const shortSide = Math.min(screen.width, screen.height);
 +    const longSide = Math.max(screen.width, screen.height);
++    // [1.1] 휴대폰: 엔트리 편집기는 가로 1024 · 세로 590 보다 작아지지 않는다.
++    //  예전에는 늘 가로 1280 으로 맞춰서, 세로가 짧은 휴대폰에서는 아래쪽(오브젝트 정보·블록 꾸러미)이 잘렸다.
++    //  → 화면 비율에 맞춰 세로 590 이 꼭 들어가는 가로 폭을 고른다 (가로는 최소 1024). 앱은 휴대폰에서 상태·탐색 막대를 숨겨 화면을 다 쓴다.
++    const phoneWidth = Math.max(1024, Math.ceil((longSide * 590) / Math.max(1, shortSide)));
 +    meta.content =
 +        longSide >= 1024 && shortSide >= 600
 +            ? 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no'
-+            : 'width=1280, user-scalable=yes';
++            : `width=${phoneWidth}, user-scalable=yes`;
 +    document.head.appendChild(meta);
 +})();
 +
@@ -18489,10 +19164,10 @@ index 00000000..9bd437ca
 +}
 diff --git a/src/web/webMain.ts b/src/web/webMain.ts
 new file mode 100644
-index 00000000..ff7ab218
+index 00000000..88576bbf
 --- /dev/null
 +++ b/src/web/webMain.ts
-@@ -0,0 +1,1029 @@
+@@ -0,0 +1,1031 @@
 +import { lt } from '../common/localLang';
 +import XLSX from 'xlsx';
 +import { vfs, join, basename, extname, normalize } from './vfs';
@@ -18525,6 +19200,7 @@ index 00000000..ff7ab218
 +    entryShare,
 +    entrySetLang,
 +    entryCancelSave,
++    entryPrewarm,
 +} from './entryAccountWeb';
 +import {
 +    PICK,
@@ -19431,6 +20107,7 @@ index 00000000..ff7ab218
 +        }),
 +    'entry:share': (projectId: string) => entryShare(projectId),
 +    'entry:cancelSave': () => entryCancelSave(),
++    'entry:prewarm': (projectId?: string) => entryPrewarm(projectId),
 +    // [entry-local] 나의 보관함 (앱 저장소 backpack/ 에 저장 — Windows 의 backpackStore.ts 와 같은 형식)
 +    'backpack:list': () => serialize(backpackIndex),
 +    'backpack:add': (meta: { type: 'block' | 'object'; title: string; imgPath?: string }, item: any) =>
