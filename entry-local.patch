@@ -14479,7 +14479,7 @@ index 00000000..86986717
 +}
 diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
 new file mode 100644
-index 00000000..06c75b78
+index 00000000..23e8aa2a
 --- /dev/null
 +++ b/src/common/buildInfo.ts
 @@ -0,0 +1,22 @@
@@ -14491,7 +14491,7 @@ index 00000000..06c75b78
 + *   - ENTRY_LOCAL_BUILD: 같은 버전 안에서 어떤 패치로 빌드됐는지 구별하는 날짜 번호
 + */
 +export const APP_VERSION = '1.2.0';
-+export const ENTRY_LOCAL_BUILD = '2026.10.29-c'; // 안드로이드 하드웨어 연결 — 블루투스(시리얼·BLE) 추가
++export const ENTRY_LOCAL_BUILD = '2026.10.30-a'; // 하드웨어 칸: PC 연결 프로그램 버튼이 다시 나오던 문제
 +
 +/** 앱 이름 (안드로이드 / Windows) */
 +export const APP_NAME_ANDROID = 'Entry for Android';
@@ -20499,10 +20499,10 @@ index 00000000..75a0dbf2
 +}
 diff --git a/src/renderer/helper/hardwareLite.ts b/src/renderer/helper/hardwareLite.ts
 new file mode 100644
-index 00000000..3d177a97
+index 00000000..4600091a
 --- /dev/null
 +++ b/src/renderer/helper/hardwareLite.ts
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,210 @@
 +/**
 + * [entry-local 1.2] 하드웨어 연결 (안드로이드) — 엔트리 '하드웨어 웹 연결(Hardware Lite)'을 앱에서 쓰기
 + *
@@ -20552,6 +20552,8 @@ index 00000000..3d177a97
 +        'Hardware not found.\nCheck the firmware is installed\nand the USB (OTG) cable\nor Bluetooth is connected.'
 +    );
 +}
++
++const PROGRAM_CLASSES = ['arduinoDisconnected', 'arduinoConnect', 'arduinoConnected'];
 +
 +/** PC 연결 프로그램(entry-hw)용 버튼은 숨긴다 — 엔트리가 메뉴를 다시 그릴 때마다 */
 +function hideProgramButtons() {
@@ -20630,6 +20632,20 @@ index 00000000..3d177a97
 +        Entry.HW.prototype.__elNoSocket = true;
 +        Entry.HW.prototype._initSocket = function () {
 +            // 안드로이드에는 연결 프로그램이 없다
++        };
++    }
++    // PC 연결 프로그램용 버튼(연결 프로그램 열기·다운로드·'데스크톱 PC에서만 지원' 안내 등)은 다시 보이지 않게 한다.
++    // 엔트리는 하드웨어 메뉴를 새로 그리는 함수를 처음에 묶어 두고(bind) 이벤트마다 부르므로,
++    // 그 함수를 바꾸는 대신 블록 메뉴의 '보이기(unbanClass)'에서 이 분류들만 막는다.
++    const BlockMenu = Entry && Entry.BlockMenu;
++    if (BlockMenu && BlockMenu.prototype && !BlockMenu.prototype.__elHwPatched) {
++        BlockMenu.prototype.__elHwPatched = true;
++        const unban = BlockMenu.prototype.unbanClass;
++        BlockMenu.prototype.unbanClass = function (className: string, ...rest: any[]) {
++            if (PROGRAM_CLASSES.includes(className)) {
++                return this.banClass(className, ...rest);
++            }
++            return unban.call(this, className, ...rest);
 +        };
 +    }
 +    return Object.assign({}, options, { hardwareEnable: true });
