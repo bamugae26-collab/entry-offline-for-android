@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 앱 아이콘: 파란 바탕 + 하드웨어 연결(플러그) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#4F80FF"
+        android:pathData="M54,6a48,48 0,1 1,0 96a48,48 0,1 1,0 -96z"/>
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M42,26h6v14h12V26h6v14h6v20l-14,14v10H50V74L36,60V40h6z"/>
+    <path android:fillColor="#00B6B1"
+        android:pathData="M47,84h14v8H47z"/>
+</vector>

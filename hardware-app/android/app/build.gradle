@@ -1,0 +1,85 @@
+apply plugin: 'com.android.application'
+
+android {
+    namespace = "biz.softline.entryhw"
+    compileSdk = 36
+    // 깃허브 서버에 설치된 NDK 를 쓴다 (없으면 sdkmanager 로 설치: build-hw-apk.yml)
+    ndkVersion = System.getenv("ENTRY_HW_NDK_VERSION") ?: "27.2.12479018"
+
+    defaultConfig {
+        applicationId "biz.softline.entryhw"
+        minSdkVersion 24
+        targetSdkVersion 36
+        versionCode 1
+        versionName "1.0.0"
+        ndk {
+            // nodejs-mobile 이 제공하는 ARM 용 (태블릿·휴대폰). x86_64(에뮬레이터)는 용량 때문에 뺀
+            abiFilters "arm64-v8a", "armeabi-v7a"
+        }
+        externalNativeBuild {
+            cmake {
+                cppFlags ""
+                // libnode.so 가 c++_shared 를 쓴다. 16KB 페이지 기기(안드로이드 15+)도 지원
+                arguments "-DANDROID_STL=c++_shared", "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+
+    sourceSets {
+        main {
+            // libnode.so (nodejs-mobile) — 빌드 때 libnode/ 에 내려받는다
+            jniLibs.srcDirs 'libnode/bin/'
+        }
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
+    aaptOptions {
+        // node_modules 안의 '_' 로 시작하는 폴더·파일도 빠짐없이 넣는다 (기본 규칙은 뺀)
+        ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:!CVS:!thumbs.db:!picasa.ini:!*~'
+        noCompress 'png', 'jpg', 'jpeg', 'gif', 'woff'
+    }
+
+    // 배포용 서명: keystore.properties (Entry for Android 와 같은 키를 써도 된다)
+    def keystorePropsFile = rootProject.file('keystore.properties')
+    if (keystorePropsFile.exists()) {
+        def props = new Properties()
+        keystorePropsFile.withInputStream { props.load(it) }
+        signingConfigs {
+            release {
+                storeFile rootProject.file(props['storeFile'])
+                storePassword props['storePassword']
+                keyAlias props['keyAlias']
+                keyPassword props['keyPassword']
+            }
+        }
+        buildTypes.release.signingConfig signingConfigs.release
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // USB 시리얼 드라이버: 아두이노 정품(CDC)·CH340·CP210x·FTDI·PL2303 (MIT)
+    implementation 'com.github.mik3y:usb-serial-for-android:3.9.0'
+}

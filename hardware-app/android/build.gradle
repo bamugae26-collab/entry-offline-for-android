@@ -1,0 +1,19 @@
+// Entry Android Hardware — 엔트리 하드웨어 연결 프로그램 (안드로이드)
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.13.0'
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+        // usb-serial-for-android (MIT)
+        maven { url 'https://jitpack.io' }
+    }
+}
