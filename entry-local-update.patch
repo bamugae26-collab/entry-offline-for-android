@@ -1,0 +1,453 @@
+diff --git a/mobile/android/app/src/main/AndroidManifest.xml b/mobile/android/app/src/main/AndroidManifest.xml
+index 0805f20e..17a9b869 100644
+--- a/mobile/android/app/src/main/AndroidManifest.xml
++++ b/mobile/android/app/src/main/AndroidManifest.xml
+@@ -9,7 +9,8 @@
+         android:supportsRtl="true"
+         android:largeHeap="true"
+         android:hardwareAccelerated="true"
+-        android:theme="@style/AppTheme">
++        android:theme="@style/AppTheme"
++        android:networkSecurityConfig="@xml/network_security_config">
+ 
+         <activity
+             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density"
+@@ -38,6 +39,11 @@
+         </provider>
+     </application>
+ 
++    <!-- [1.2] 연결 프로그램 앱(Entry Android Hardware)이 설치되어 있는지 확인 (안드로이드 11+) -->
++    <queries>
++        <package android:name="biz.softline.entryhw" />
++    </queries>
++
+     <!-- Permissions -->
+ 
+     <!-- 인공지능·확장 블록(온라인)용. 엔트리 로컬 자체는 서버에 접속하지 않는다. -->
+diff --git a/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryHwAppPlugin.java b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryHwAppPlugin.java
+new file mode 100644
+index 00000000..4548f40c
+--- /dev/null
++++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryHwAppPlugin.java
+@@ -0,0 +1,65 @@
++package biz.softline.entrylocal;
++
++import android.content.ComponentName;
++import android.content.Intent;
++import android.content.pm.PackageInfo;
++import android.content.pm.PackageManager;
++import com.getcapacitor.JSObject;
++import com.getcapacitor.Plugin;
++import com.getcapacitor.PluginCall;
++import com.getcapacitor.PluginMethod;
++import com.getcapacitor.annotation.CapacitorPlugin;
++
++/**
++ * [entry-local 1.2] 연결 프로그램 앱(Entry Android Hardware, biz.softline.entryhw) 열기
++ *
++ * PC 엔트리는 'entryhw://?roomId:…' 주소로 하드웨어 연결 프로그램을 연다.
++ * 안드로이드에서는 그 앱을 직접 연다 (roomId 를 함께 넘김). 앱은 127.0.0.1:23518 에서 엔트리를 기다리고,
++ * 하드웨어가 연결되면 이 앱(Entry for Android)으로 다시 돌아온다.
++ * 앱이 설치되어 있는지 보려면 AndroidManifest 의 <queries> 에 패키지가 적혀 있어야 한다 (안드로이드 11+).
++ */
++@CapacitorPlugin(name = "EntryHwApp")
++public class EntryHwAppPlugin extends Plugin {
++
++    static final String HW_PACKAGE = "biz.softline.entryhw";
++    static final String HW_ACTIVITY = "biz.softline.entryhw.MainActivity";
++
++    @SuppressWarnings("deprecation")
++    private PackageInfo info() {
++        try {
++            return getContext().getPackageManager().getPackageInfo(HW_PACKAGE, 0);
++        } catch (PackageManager.NameNotFoundException e) {
++            return null;
++        }
++    }
++
++    @PluginMethod
++    public void isInstalled(PluginCall call) {
++        PackageInfo p = info();
++        JSObject r = new JSObject();
++        r.put("installed", p != null);
++        if (p != null) r.put("versionName", p.versionName);
++        call.resolve(r);
++    }
++
++    @PluginMethod
++    public void launch(PluginCall call) {
++        if (info() == null) {
++            call.reject("not installed", "NOT_INSTALLED");
++            return;
++        }
++        try {
++            Intent intent = new Intent(Intent.ACTION_MAIN);
++            intent.setComponent(new ComponentName(HW_PACKAGE, HW_ACTIVITY));
++            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
++            intent.putExtra("fromEntry", true);
++            intent.putExtra("entryPackage", getContext().getPackageName());
++            String roomId = call.getString("roomId", "");
++            if (roomId != null && !roomId.isEmpty()) intent.putExtra("roomId", roomId);
++            getActivity().startActivity(intent);
++            call.resolve();
++        } catch (Exception e) {
++            call.reject(e.getMessage(), "LAUNCH_FAILED");
++        }
++    }
++}
+diff --git a/mobile/android/app/src/main/java/biz/softline/entrylocal/MainActivity.java b/mobile/android/app/src/main/java/biz/softline/entrylocal/MainActivity.java
+index 3c83eb7a..77b210a4 100644
+--- a/mobile/android/app/src/main/java/biz/softline/entrylocal/MainActivity.java
++++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/MainActivity.java
+@@ -26,6 +26,7 @@ public class MainActivity extends BridgeActivity implements ModifiedMainActivity
+         // [entry-local 1.2] 하드웨어 연결 (USB 시리얼)
+         registerPlugin(EntrySerialPlugin.class);
+         registerPlugin(EntryBlePlugin.class); // [1.2] 블루투스 LE 하드웨어
++        registerPlugin(EntryHwAppPlugin.class); // [1.2] 연결 프로그램 앱 열기
+         super.onCreate(savedInstanceState);
+ 
+         // [entry-local] 성능: 화면을 기기의 최고 주사율(90/120Hz)로
+diff --git a/mobile/android/app/src/main/res/xml/network_security_config.xml b/mobile/android/app/src/main/res/xml/network_security_config.xml
+new file mode 100644
+index 00000000..695f7e69
+--- /dev/null
++++ b/mobile/android/app/src/main/res/xml/network_security_config.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- [1.2] 이 기기 안(127.0.0.1)의 하드웨어 연결 프로그램과만 암호화 없이(http/ws) 통신을 허용한다 -->
++<network-security-config>
++    <base-config cleartextTrafficPermitted="false" />
++    <domain-config cleartextTrafficPermitted="true">
++        <domain includeSubdomains="false">127.0.0.1</domain>
++        <domain includeSubdomains="false">localhost</domain>
++    </domain-config>
++</network-security-config>
+diff --git a/mobile/capacitor.config.json b/mobile/capacitor.config.json
+index 0dd92867..26663b38 100644
+--- a/mobile/capacitor.config.json
++++ b/mobile/capacitor.config.json
+@@ -3,7 +3,7 @@
+   "appName": "엔트리 로컬",
+   "webDir": "www",
+   "android": {
+-    "allowMixedContent": false,
++    "allowMixedContent": true,
+     "captureInput": false,
+     "webContentsDebuggingEnabled": false
+   },
+diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
+index 23e8aa2a..a897930e 100644
+--- a/src/common/buildInfo.ts
++++ b/src/common/buildInfo.ts
+@@ -6,7 +6,7 @@
+  *   - ENTRY_LOCAL_BUILD: 같은 버전 안에서 어떤 패치로 빌드됐는지 구별하는 날짜 번호
+  */
+ export const APP_VERSION = '1.2.0';
+-export const ENTRY_LOCAL_BUILD = '2026.10.30-a'; // 하드웨어 칸: PC 연결 프로그램 버튼이 다시 나오던 문제
++export const ENTRY_LOCAL_BUILD = '2026.10.30-b'; // 연결 프로그램 앱(Entry Android Hardware) 연동
+ 
+ /** 앱 이름 (안드로이드 / Windows) */
+ export const APP_NAME_ANDROID = 'Entry for Android';
+diff --git a/src/common/entryAccount.ts b/src/common/entryAccount.ts
+index 4969b071..24421f43 100644
+--- a/src/common/entryAccount.ts
++++ b/src/common/entryAccount.ts
+@@ -79,10 +79,14 @@ export function normalizeEntryUser(value: any): EntryUser | undefined {
+ export function isAllowedExternalUrl(url: string) {
+     try {
+         const u = new URL(url);
+-        return (
+-            u.protocol === 'https:' &&
+-            ['playentry.org', 'www.playentry.org', 'drive.google.com', 'myaccount.google.com'].includes(u.hostname)
+-        );
++        if (u.protocol !== 'https:') {
++            return false;
++        }
++        // [1.2] 연결 프로그램 앱(Entry Android Hardware) 내려받기 — 이 앱 저장소의 릴리스만
++        if (u.hostname === 'github.com' && u.pathname.startsWith('/bamugae26-collab/entry-offline-for-android/releases/')) {
++            return true;
++        }
++        return ['playentry.org', 'www.playentry.org', 'drive.google.com', 'myaccount.google.com'].includes(u.hostname);
+     } catch (e) {
+         return false;
+     }
+diff --git a/src/renderer/helper/hardwareLite.ts b/src/renderer/helper/hardwareLite.ts
+index 4600091a..692f071f 100644
+--- a/src/renderer/helper/hardwareLite.ts
++++ b/src/renderer/helper/hardwareLite.ts
+@@ -15,6 +15,10 @@ import _ from 'lodash';
+ 
+ const E = () => (window as any).Entry;
+ 
++/** 연결 프로그램(Entry Android Hardware) apk — GitHub 저장소 릴리스 'hardware-latest' 에 늘 같은 이름으로 올린다 */
++export const HARDWARE_APP_DOWNLOAD_URL =
++    'https://github.com/bamugae26-collab/entry-offline-for-android/releases/download/hardware-latest/EntryAndroidHardware.apk';
++
+ /** 안드로이드 앱이고 USB 시리얼(navigator.serial)이 준비됨 */
+ export function hardwareLiteAvailable() {
+     const cap = (window as any).Capacitor;
+@@ -48,20 +52,6 @@ export function supplementHardwareLiteLang(Lang: any, langType?: string) {
+     );
+ }
+ 
+-const PROGRAM_CLASSES = ['arduinoDisconnected', 'arduinoConnect', 'arduinoConnected'];
+-
+-/** PC 연결 프로그램(entry-hw)용 버튼은 숨긴다 — 엔트리가 메뉴를 다시 그릴 때마다 */
+-function hideProgramButtons() {
+-    const Entry = E();
+-    const blockMenu = Entry && Entry.getMainWS && Entry.getMainWS() && Entry.getMainWS().blockMenu;
+-    if (!blockMenu) {
+-        return;
+-    }
+-    blockMenu.banClass('arduinoDisconnected', true);
+-    blockMenu.banClass('arduinoConnect', true);
+-    blockMenu.banClass('arduinoConnected', true);
+-}
+-
+ let popupOpen = false;
+ 
+ async function showHardwareLitePopup(switchPopup: (type: string, events: any, data: any, imageBaseUrl?: string) => Promise<void>) {
+@@ -115,33 +105,29 @@ async function showHardwareLitePopup(switchPopup: (type: string, events: any, da
+ }
+ 
+ /**
+- * Entry.init 옵션: 안드로이드판은 원래 하드웨어 칸을 껐다(hardwareEnable: false, 연결 프로그램이 없으므로).
+- * USB 시리얼이 있으면 칸을 켜되, PC 연결 프로그램(127.0.0.1:23518)에 접속하려는 시도는 막는다.
++ * Entry.init 옵션: 안드로이드판은 원래 하드웨어 칸을 껐다(hardwareEnable: false).
++ * 이제 두 가지 연결을 쓴다.
++ *  - 프로그램을 설치해 연결할 때: 'Entry Android Hardware' 앱(PC 연결 프로그램과 같은 역할, 127.0.0.1:23518)
++ *  - 프로그램 설치 없이 연결할 때: 하드웨어 웹 연결 (USB·블루투스 직접)
+  */
+ export function applyHardwareInitOption(options: any) {
+     const Entry = E();
+     if (!hardwareLiteAvailable()) {
+         return options;
+     }
+-    if (Entry && Entry.HW && Entry.HW.prototype && !Entry.HW.prototype.__elNoSocket) {
+-        Entry.HW.prototype.__elNoSocket = true;
+-        Entry.HW.prototype._initSocket = function () {
+-            // 안드로이드에는 연결 프로그램이 없다
+-        };
++    const HW = Entry && Entry.HW;
++    if (HW && HW.prototype && !HW.prototype.__elAndroid) {
++        HW.prototype.__elAndroid = true;
++        // 연결 프로그램은 이 기기 안(127.0.0.1)에만 있다 — hw.playentry.org(PC 인증서 서버)는 시도하지 않는다
++        const local = { get: () => 'http://127.0.0.1:23518', configurable: true };
++        Object.defineProperty(HW.prototype, 'httpsServerAddress', local);
++        Object.defineProperty(HW.prototype, 'httpsServerAddress2', local);
+     }
+-    // PC 연결 프로그램용 버튼(연결 프로그램 열기·다운로드·'데스크톱 PC에서만 지원' 안내 등)은 다시 보이지 않게 한다.
+-    // 엔트리는 하드웨어 메뉴를 새로 그리는 함수를 처음에 묶어 두고(bind) 이벤트마다 부르므로,
+-    // 그 함수를 바꾸는 대신 블록 메뉴의 '보이기(unbanClass)'에서 이 분류들만 막는다.
+-    const BlockMenu = Entry && Entry.BlockMenu;
+-    if (BlockMenu && BlockMenu.prototype && !BlockMenu.prototype.__elHwPatched) {
+-        BlockMenu.prototype.__elHwPatched = true;
+-        const unban = BlockMenu.prototype.unbanClass;
+-        BlockMenu.prototype.unbanClass = function (className: string, ...rest: any[]) {
+-            if (PROGRAM_CLASSES.includes(className)) {
+-                return this.banClass(className, ...rest);
+-            }
+-            return unban.call(this, className, ...rest);
+-        };
++    try {
++        // 웹판의 '하드웨어 1.9.39 이상만 지원' 안내는 해당 없음
++        localStorage.setItem('skipNoticeHWOldVersion', 'true');
++    } catch (e) {
++        // 저장소 없음
+     }
+     return Object.assign({}, options, { hardwareEnable: true });
+ }
+@@ -160,21 +146,22 @@ export function installHardwareLite(
+         hwLite.__elPatched = true;
+         // 원래는 PC 크롬만 지원 (모바일·일렉트론 제외) → 이 앱은 USB 시리얼이 있으므로 지원
+         hwLite.isHwLiteSupportAgent = () => true;
+-        const refresh = hwLite.refreshHardwareLiteBlockMenu;
+-        hwLite.refreshHardwareLiteBlockMenu = function (...args: any[]) {
+-            const r = refresh.apply(this, args);
+-            hideProgramButtons();
+-            return r;
+-        };
+     }
+-    const hw = Entry.hw;
+-    if (hw && !hw.__elPatched && typeof hw._setHardwareDefaultMenu === 'function') {
+-        hw.__elPatched = true;
+-        const original = hw._setHardwareDefaultMenu;
+-        hw._setHardwareDefaultMenu = function (...args: any[]) {
+-            const r = original.apply(this, args);
+-            hideProgramButtons();
+-            return r;
++    // 프로그램을 설치해 연결할 때 — Entry Android Hardware 앱
++    //  [하드웨어 연결하기]·[연결 프로그램 열기] : 앱 열기 (없으면 '미설치 안내' 창) — window.openHardwarePage (web/hardwareApp.ts)
++    //  [연결 프로그램 다운로드]·안내 창의 다운로드 : GitHub 릴리스의 apk
++    const HWProto = Entry.HW && Entry.HW.prototype;
++    if (HWProto) {
++        HWProto.downloadConnector = function () {
++            const open = (window as any).ipcInvoke;
++            if (open) {
++                Promise.resolve(open('app:openExternal', HARDWARE_APP_DOWNLOAD_URL)).catch((e: any) => console.warn('download open failed', e));
++            } else {
++                window.open(HARDWARE_APP_DOWNLOAD_URL, '_blank');
++            }
++        };
++        HWProto.retryConnect = function () {
++            this.openHardwareProgram();
+         };
+     }
+     Entry.addEventListener('openHardwareLiteBlockManager', () => showHardwareLitePopup(switchPopup));
+diff --git a/src/renderer/resources/static.js b/src/renderer/resources/static.js
+index c05468c0..50e4be29 100644
+--- a/src/renderer/resources/static.js
++++ b/src/renderer/resources/static.js
+@@ -15,6 +15,14 @@ EntryStatic.getAllBlocks = () => {
+             arduino.blocks.splice(index, 1);
+         }
+     });
++    // [entry-local 1.2] 안드로이드: 연결 프로그램은 'Entry Android Hardware' 앱이므로 PC 전용 항목은 뺀다
++    //  - arduino_cloud_pc_open   : 클라우드 PC 연결 (다른 PC 의 연결 프로그램 공유)
++    //  - hardware_connect_helper : 하드웨어 연결 도움말 (PC 설치 안내)
++    //  - arduino_noti            : '하드웨어 연결은 데스크톱 PC에서만 지원됩니다'
++    const cap = window.Capacitor;
++    if ((cap && cap.isNativePlatform && cap.isNativePlatform()) || window.__EL_HW_TEST__) {
++        _.remove(arduino.blocks, (block) => ['arduino_cloud_pc_open', 'hardware_connect_helper', 'arduino_noti'].includes(block));
++    }
+ 
+     const aiModelTrainCategory = _.find(allBlocks, ['category', 'ai_utilize']);
+     aiModelTrainCategory.blocks.forEach((block, index) => {
+diff --git a/src/web/hardwareApp.ts b/src/web/hardwareApp.ts
+new file mode 100644
+index 00000000..ba0451be
+--- /dev/null
++++ b/src/web/hardwareApp.ts
+@@ -0,0 +1,108 @@
++/**
++ * [entry-local 1.2] 연결 프로그램 앱 (Entry Android Hardware) 열기
++ *
++ * PC 엔트리는 하드웨어 연결 프로그램을 'entryhw://' 주소로 열고, 프로그램은 127.0.0.1:23518 에서 엔트리를 기다린다.
++ * 안드로이드에서는 같은 역할의 앱(biz.softline.entryhw)을 플러그인(EntryHwAppPlugin.java)으로 연다.
++ *  - 앱이 없으면: 엔트리의 '미설치 안내' 창 → [연결 프로그램 다운로드] = GitHub 릴리스 apk
++ *  - 앱을 열면: 그 앱에서 하드웨어를 고르고 연결 → 이 앱으로 돌아오면 소켓 연결 (127.0.0.1:23518)
++ */
++import { registerPlugin } from '@capacitor/core';
++import { App } from '@capacitor/app';
++import { isNative } from './platform';
++
++interface EntryHwAppPlugin {
++    isInstalled(): Promise<{ installed: boolean; versionName?: string }>;
++    launch(options: { roomId?: string }): Promise<void>;
++}
++
++const HwApp = registerPlugin<EntryHwAppPlugin>('EntryHwApp');
++
++const w = window as any;
++
++/** 시험용(PC 크롬): window.__EL_HW_APP_TEST__ = { installed, launched[] } */
++function testHook() {
++    return w.__EL_HW_APP_TEST__;
++}
++
++async function isInstalled() {
++    const test = testHook();
++    if (test) {
++        return !!test.installed;
++    }
++    try {
++        return (await HwApp.isInstalled()).installed;
++    } catch (e) {
++        return false;
++    }
++}
++
++async function launch(roomId?: string) {
++    const test = testHook();
++    if (test) {
++        (test.launched = test.launched || []).push(roomId || '');
++        return;
++    }
++    await HwApp.launch({ roomId });
++}
++
++let watchUntil = 0;
++
++/** 연결 프로그램 앱을 연 뒤 한동안: 이 앱으로 돌아올 때마다 연결 시도 */
++function connectSoon() {
++    const Entry = w.Entry;
++    if (!Entry || !Entry.hw || Entry.hw.programConnected) {
++        return;
++    }
++    try {
++        Entry.hw._initSocket();
++    } catch (e) {
++        // 다음에 다시
++    }
++}
++
++function watchReturn() {
++    watchUntil = Date.now() + 10 * 60 * 1000;
++}
++
++function onReturn() {
++    if (Date.now() < watchUntil) {
++        setTimeout(connectSoon, 300);
++        setTimeout(connectSoon, 2500);
++    }
++}
++
++document.addEventListener('visibilitychange', () => {
++    document.visibilityState === 'visible' && onReturn();
++});
++if (isNative()) {
++    App.addListener('resume', onReturn).catch(() => undefined);
++}
++
++/** [하드웨어 연결하기] · [연결 프로그램 열기] */
++export async function openHardwareApp() {
++    const Entry = w.Entry;
++    if (!(await isInstalled())) {
++        Entry && Entry.hw && Entry.hw.openHardwareDownloadPopup();
++        return;
++    }
++    let roomId: string | undefined;
++    try {
++        roomId = (Entry && Entry.hw && Entry.hw.sessionRoomId) || undefined;
++    } catch (e) {
++        roomId = undefined;
++    }
++    try {
++        await launch(roomId);
++    } catch (e) {
++        Entry && Entry.hw && Entry.hw.openHardwareDownloadPopup();
++        return;
++    }
++    watchReturn();
++    // 앱이 이미 켜져 있었다면 바로 연결된다
++    setTimeout(connectSoon, 1500);
++}
++
++/** 안드로이드 앱(또는 시험 모드)에서만 연결 프로그램 앱을 쓴다 */
++export function hardwareAppSupported() {
++    return isNative() || !!testHook();
++}
+diff --git a/src/web/shim.ts b/src/web/shim.ts
+index a9e3d40f..48e528ef 100644
+--- a/src/web/shim.ts
++++ b/src/web/shim.ts
+@@ -4,6 +4,7 @@ import { initVFS } from './vfs';
+ import { invoke } from './webMain';
+ import { installAndroidSerial } from './webSerial';
+ import { installAndroidBluetooth } from './webBluetooth';
++import { openHardwareApp, hardwareAppSupported } from './hardwareApp';
+ import { listen } from './bus';
+ import {
+     installFilePathPolyfill,
+@@ -72,6 +73,11 @@ w.ipcListen = (channel: string, fn: (event: any, ...args: any[]) => void) => lis
+ w.sendSync = () => undefined;
+ w.openEntryWebPage = () => undefined;
+ w.openHardwarePage = () => {
++    // [1.2] 연결 프로그램 앱(Entry Android Hardware)을 연다 — 없으면 엔트리의 '미설치 안내' 창
++    if (hardwareAppSupported()) {
++        openHardwareApp();
++        return;
++    }
+     const message = lt('안드로이드판에서는 하드웨어 연결을 지원하지 않습니다.', 'Hardware connection is not supported in the Android version.');
+     if (w.EntryModal) {
+         w.EntryModal.alert(message);

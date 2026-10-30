@@ -36,6 +36,8 @@ git fetch --all --quiet
 git checkout -f "$BASE_COMMIT"
 git clean -fdq -e node_modules -e mobile/node_modules -e mobile/android/keystore.properties -e 'mobile/android/*.jks'
 git apply --whitespace=nowarn "$KIT/entry-local.patch"
+# 추가 패치 (있으면) — 큰 패치 파일을 매번 다시 올리지 않도록 이후 변경분만 따로 둔다
+[ -f "$KIT/entry-local-update.patch" ] && git apply --whitespace=nowarn "$KIT/entry-local-update.patch"
 echo "패치 적용 완료"
 
 # 2. 웹 화면 빌드 (Electron 네이티브 모듈 불필요 → 스크립트 없이 설치)

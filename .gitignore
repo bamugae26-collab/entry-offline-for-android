@@ -2,3 +2,13 @@ entry-offline/
 out/
 *.jks
 google-client.json
+.hw-build/
+hardware-app/node-src/node_modules/
+hardware-app/android/app/libnode/
+hardware-app/android/app/src/main/assets/
+hardware-app/android/local.properties
+hardware-app/android/keystore.properties
+hardware-app/android/.gradle/
+hardware-app/android/app/build/
+hardware-app/android/app/.cxx/
+hardware-app/android/build/
