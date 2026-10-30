@@ -1,0 +1,28 @@
+{
+  "name": "entry-android-hardware-node",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Entry Android Hardware — entry-hw core for Android (nodejs-mobile)",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "devDependencies": {
+    "@serialport/parser-delimiter": "9.2.4",
+    "@serialport/parser-readline": "9.2.4",
+    "esbuild": "0.24.0",
+    "immer": "4.0.2",
+    "lodash": "4.17.21",
+    "react": "16.14.0",
+    "react-dom": "16.14.0",
+    "react-redux": "7.2.9",
+    "react-transition-group": "4.4.5",
+    "redux": "4.2.1",
+    "semver": "7.6.3",
+    "socket.io": "2.5.0",
+    "socket.io-client": "2.5.0",
+    "styled-components": "4.4.1"
+  },
+  "dependencies": {
+    "sprintf-js": "^1.1.3"
+  }
+}
