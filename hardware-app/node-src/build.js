@@ -24,7 +24,7 @@ if (!fs.existsSync(path.join(HW, 'app', 'src', 'main', 'mainRouter.ts'))) {
     process.exit(1);
 }
 
-/** entry-hw 소스를 안드로이드에 맞게 조금 고치는 곳 (찾는 글자가 없으면 빌드 실패 → 원본이 바뀐 것) */
+/** entry-hw 소스를 안드로이드에 맞게 조금 고치는 곳 (찾는 글자가 없으면 빌드 실패 → 원본이 바뀜 것) */
 const PATCHES = {
     'main/core/serial/scanner.ts': [
         [
@@ -106,6 +106,42 @@ async function buildMain() {
     fs.writeFileSync(path.join(OUT, 'nativeNodeRequire.js'), 'module.exports = (modulePath) => require(modulePath);\n');
 }
 
+/** 화면(React) 쪽 entry-hw 소스 고치기 (찾는 글자가 없으면 빌드 실패) */
+const UI_PATCHES = {
+    'renderer/react/main/components/hardwareList/ErrorAlert.tsx': [
+        [
+            // '하드웨어 연결과 작동 시 예기치 못한 문제가…' 안내에 [×] 닫기 — 한 번 닫으면 다음에도 닫힌 채로
+            `const ErrorAlert = () => {
+    const { translator } = usePreload();
+    return (
+        <ErrorAlertContainer>`,
+            `const ErrorAlert = () => {
+    const { translator } = usePreload();
+    const [closed, setClosed] = React.useState(() => {
+        try {
+            return localStorage.getItem('android.hideErrorAlert') === '1';
+        } catch (e) {
+            return false;
+        }
+    });
+    if (closed) {
+        return null;
+    }
+    const close = () => {
+        try {
+            localStorage.setItem('android.hideErrorAlert', '1');
+        } catch (e) {
+            // 저장 못 함 — 이번에만 닫힘
+        }
+        setClosed(true);
+    };
+    return (
+        <ErrorAlertContainer style={{ position: 'relative' }}>
+            <button type="button" className="android-alert-close" aria-label="close" onClick={close}>×</button>`,
+        ],
+    ],
+};
+
 async function buildUi() {
     const uiOut = path.join(OUT, 'ui');
     fs.mkdirSync(uiOut, { recursive: true });
@@ -134,6 +170,20 @@ async function buildUi() {
                             }
                         }
                         return undefined;
+                    });
+                    build.onLoad({ filter: /\.tsx?$/ }, (args) => {
+                        const rel = path.relative(path.join(HW, 'app', 'src'), args.path).split(path.sep).join('/');
+                        if (!UI_PATCHES[rel]) {
+                            return undefined;
+                        }
+                        let text = fs.readFileSync(args.path, 'utf8');
+                        UI_PATCHES[rel].forEach(([from, to]) => {
+                            if (!text.includes(from)) {
+                                throw new Error(`patch target not found in ${rel}: ${from.slice(0, 60)}`);
+                            }
+                            text = text.replace(from, to);
+                        });
+                        return { contents: text, loader: rel.endsWith('.tsx') ? 'tsx' : 'ts' };
                     });
                 },
             },

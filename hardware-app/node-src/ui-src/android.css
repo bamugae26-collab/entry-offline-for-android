@@ -14,3 +14,10 @@ body { overscroll-behavior: none; }
 .android-about-box p { margin: 6px 0; color: #2c313d; font-size: 15px; }
 .android-about-box p.sub { color: #79818f; font-size: 13px; }
 .android-about-ok { margin-top: 18px; padding: 10px 40px; border: 0; border-radius: 6px; background: #4f80ff; color: #fff; font-size: 15px; }
+/* '예기치 못한 문제' 안내 닫기 [×] */
+.android-alert-close {
+    position: absolute; top: 8px; right: 12px; width: 36px; height: 36px;
+    border: 0; border-radius: 18px; background: transparent;
+    color: #79818f; font-size: 26px; line-height: 36px; padding: 0; cursor: pointer;
+}
+.android-alert-close:active { background: rgba(0, 0, 0, .08); }
