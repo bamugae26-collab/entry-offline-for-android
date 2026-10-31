@@ -132,10 +132,25 @@ public class HardwareService extends Service implements NodeBridge.Notifications
         return START_STICKY;
     }
 
+    /**
+     * 최근 앱 목록에서 이 앱 창을 밀어 지웠다 → [종료]와 똑같이 끝낸다.
+     * 연결 프로그램(127.0.0.1:23518)이 꺼져야 Entry for Android 의 하드웨어 칸이 처음 화면([하드웨어 연결하기])으로 돌아간다.
+     * (연결된 뒤 Entry for Android 로 넘어갈 때는 창을 지우지 않고 뒤로 보내므로 연결은 그대로 유지된다)
+     */
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        shutdownApp();
+        super.onTaskRemoved(rootIntent);
+    }
+
+    private boolean shuttingDown;
+
     /** [종료] — 하드웨어 연결을 닫고 앱을 끝낸다 */
     void shutdownApp() {
+        if (shuttingDown) return;
+        shuttingDown = true;
         try {
-            bridge.sendEvent(new JSONObject().put("event", "stop"));
+            if (bridge != null) bridge.sendEvent(new JSONObject().put("event", "stop"));
         } catch (Exception ignored) {
             // 무시
         }
@@ -144,8 +159,10 @@ public class HardwareService extends Service implements NodeBridge.Notifications
             if (Build.VERSION.SDK_INT >= 24) {
                 stopForeground(STOP_FOREGROUND_REMOVE);
             }
+            // 서비스가 먼저 정상 종료되어야 시스템이 다시 살리지 않는다(START_STICKY) → onDestroy 에서 프로세스를 끝낸다
             stopSelf();
-            android.os.Process.killProcess(android.os.Process.myPid());
+            // 혹시 onDestroy 가 늦으면
+            main.postDelayed(() -> android.os.Process.killProcess(android.os.Process.myPid()), 1500);
         }, 400);
     }
 
@@ -239,6 +256,8 @@ public class HardwareService extends Service implements NodeBridge.Notifications
             // 무시
         }
         super.onDestroy();
+        // Node(연결 프로그램 본체)는 프로세스 안에서 돌기 때문에 프로세스째 끝내야 23518 포트가 닫힌다
+        if (shuttingDown) main.post(() -> android.os.Process.killProcess(android.os.Process.myPid()));
     }
 
     @Override
