@@ -89,11 +89,52 @@ public class MainActivity extends Activity implements HardwareService.UiListener
         loading = box;
         root.addView(box, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(root);
+        fitSystemBars(root);
 
         askPermissions();
         HardwareService.start(this);
         handleIntent(getIntent());
         waitForUi();
+    }
+
+    /** 연결 프로그램 화면 위쪽 파란 띠와 같은 색 */
+    private static final int HEADER_COLOR = Color.parseColor("#5096F5");
+
+    /**
+     * 안드로이드 15 이상은 앱 화면이 상태 표시줄·내비게이션 바 밑까지 깔린다(edge-to-edge 강제)
+     * → 화면이 막대 밑으로 들어가 잘리지 않게 그만큼 비우고, 위쪽 빈칸은 머리 띠 색으로 칠한다
+     */
+    private void fitSystemBars(FrameLayout root) {
+        if (Build.VERSION.SDK_INT >= 30) {
+            android.view.WindowInsetsController c = getWindow().getInsetsController();
+            if (c != null) {
+                // 위: 파란 바탕 → 흰 아이콘 / 아래: 흰 바탕 → 어두운 아이콘
+                c.setSystemBarsAppearance(android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+                        android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+                                | android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS);
+            }
+        } else if (Build.VERSION.SDK_INT >= 26) {
+            View d = getWindow().getDecorView();
+            d.setSystemUiVisibility(d.getSystemUiVisibility() | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        }
+        if (Build.VERSION.SDK_INT < 35) return; // 그 아래는 시스템이 막대를 피해 화면을 놓는다
+        final View top = new View(this);
+        top.setBackgroundColor(HEADER_COLOR);
+        root.addView(top, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, Gravity.TOP));
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            android.graphics.Insets b = insets.getInsets(android.view.WindowInsets.Type.systemBars()
+                    | android.view.WindowInsets.Type.displayCutout());
+            for (View child : new View[] { web, loading }) {
+                FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) child.getLayoutParams();
+                lp.setMargins(b.left, b.top, b.right, b.bottom);
+                child.setLayoutParams(lp);
+            }
+            FrameLayout.LayoutParams tp = (FrameLayout.LayoutParams) top.getLayoutParams();
+            tp.height = b.top;
+            top.setLayoutParams(tp);
+            return android.view.WindowInsets.CONSUMED;
+        });
+        root.requestApplyInsets();
     }
 
     @Override
