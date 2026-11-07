@@ -1,0 +1,15 @@
+diff --git a/src/renderer/components/header.tsx b/src/renderer/components/header.tsx
+index d36ec2e8c..703265cc8 100644
+--- a/src/renderer/components/header.tsx
++++ b/src/renderer/components/header.tsx
+@@ -708,8 +708,8 @@ class Header extends Component<IProps, IState> {
+                                     openExtensionPopup();
+                                 }}
+                             >
+-                                {/* 퍼즐 조각 (보내 준 원본 그림을 그대로 옮김) — 조각 전체가 동그라미 정가운데 */}
+-                                <svg viewBox={'709 67.5 1400 1400'} aria-label={lt('확장 프로그램', 'Extensions')}>
++                                {/* 퍼즐 조각 (보내 준 원본 그림을 그대로 옮김) — 조각의 무게 중심을 동그라미 정가운데에 (눈으로 보기에 가운데) */}
++                                <svg viewBox={'649.6 126.3 1400 1400'} overflow={'visible'} aria-label={lt('확장 프로그램', 'Extensions')}>
+                                     <path d={'M852 349H1118V247A160 160 0 0 1 1438 247V349H1705A125 125 0 0 1 1830 474V742H1933A158 158 0 0 1 1933 1058H1830V1323A125 125 0 0 1 1705 1448H1458.5V1357A180 180 0 0 0 1098.5 1357V1448H852A125 125 0 0 1 727 1323V1078H820A180 180 0 0 0 820 718H727V474A125 125 0 0 1 852 349Z'} />
+                                 </svg>
+                             </a>
