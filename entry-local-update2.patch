@@ -1,0 +1,62 @@
+diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
+index a897930e..1a45a6be 100644
+--- a/src/common/buildInfo.ts
++++ b/src/common/buildInfo.ts
+@@ -6,7 +6,7 @@
+  *   - ENTRY_LOCAL_BUILD: 같은 버전 안에서 어떤 패치로 빌드됐는지 구별하는 날짜 번호
+  */
+ export const APP_VERSION = '1.2.0';
+-export const ENTRY_LOCAL_BUILD = '2026.10.30-b'; // 연결 프로그램 앱(Entry Android Hardware) 연동
++export const ENTRY_LOCAL_BUILD = '2026.11.07-a'; // 블록 코딩·엔트리파이썬 전환 오류 창 오작동 수정
+ 
+ /** 앱 이름 (안드로이드 / Windows) */
+ export const APP_NAME_ANDROID = 'Entry for Android';
+diff --git a/src/renderer/components/header.tsx b/src/renderer/components/header.tsx
+index ad808500..7b11cd2d 100644
+--- a/src/renderer/components/header.tsx
++++ b/src/renderer/components/header.tsx
+@@ -103,6 +103,8 @@ class Header extends Component<IProps, IState> {
+     };
+ 
+     private modeErrorShownAt = 0;
++    private modeClickAt = 0;
++    private modeClickSeq = 0;
+ 
+     // [entry-local] 블록 코딩 ↔ 엔트리 파이썬 전환이 안 되면 이유를 화면에 보여 준다
+     private reportModeError(e: any) {
+@@ -137,6 +139,13 @@ class Header extends Component<IProps, IState> {
+                             if (practical) {
+                                 return;
+                             }
++                            // 한 번 누름에 두 번 바뀌지 않게 (터치 화면에서 누름이 연달아 두 번 들어오는 경우)
++                            const now = Date.now();
++                            if (now - this.modeClickAt < 500) {
++                                return;
++                            }
++                            this.modeClickAt = now;
++                            const seq = ++this.modeClickSeq;
+                             // 웹판처럼 메뉴는 열어 둔 채 그 자리에서 모드만 바꾼다
+                             const target = isPython ? 'block' : 'python';
+                             try {
+@@ -147,9 +156,19 @@ class Header extends Component<IProps, IState> {
+                                 this.reportModeError(e);
+                             }
+                             setTimeout(() => {
+-                                if (this.props.programLanguageMode !== target) {
+-                                    this.reportModeError(new Error(`mode=${this.props.programLanguageMode}, lang=${persist.lang}`));
++                                // 그 사이 다시 눌러 반대로 바꿨으면 실패가 아니다
++                                if (seq !== this.modeClickSeq || this.props.programLanguageMode === target) {
++                                    return;
++                                }
++                                const Entry = (window as any).Entry;
++                                const ws = Entry && Entry.getMainWS && Entry.getMainWS();
++                                const want = target === 'python' ? Entry.Workspace.MODE_VIMBOARD : Entry.Workspace.MODE_BOARD;
++                                // 엔트리가 바꾸는 중이거나('지원하지 않는 블록을 지우고 바꿀까요?' 확인 창)
++                                // 바꿀 수 없는 이유를 이미 창으로 보여 주고 있으면 덮어쓰지 않는다
++                                if ((ws && ws.getMode && ws.getMode() === want) || document.querySelector('#EntryModal .entry-modal-box')) {
++                                    return;
+                                 }
++                                this.reportModeError(new Error(`mode=${this.props.programLanguageMode}, lang=${persist.lang}`));
+                             }, 800);
+                         }}
+                     >
