@@ -1,0 +1,60 @@
+diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
+index 30bf4de8..c4d1c66d 100644
+--- a/src/common/buildInfo.ts
++++ b/src/common/buildInfo.ts
+@@ -6,7 +6,7 @@
+  *   - ENTRY_LOCAL_BUILD: 같은 버전 안에서 어떤 패치로 빌드됐는지 구별하는 날짜 번호
+  */
+ export const APP_VERSION = '1.2.0';
+-export const ENTRY_LOCAL_BUILD = '2026.11.07-c'; // 확장 프로그램 백그라운드·팝업(톱니바퀴 메뉴)
++export const ENTRY_LOCAL_BUILD = '2026.11.07-d'; // 앞 판에서 추가한 확장도 팝업·백그라운드 켜기
+ 
+ /** 앱 이름 (안드로이드 / Windows) */
+ export const APP_NAME_ANDROID = 'Entry for Android';
+diff --git a/src/renderer/helper/extensionHost.ts b/src/renderer/helper/extensionHost.ts
+index 1e7bbdc2..f78a5bb1 100644
+--- a/src/renderer/helper/extensionHost.ts
++++ b/src/renderer/helper/extensionHost.ts
+@@ -310,10 +310,41 @@ async function tx<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBReq
+     });
+ }
+ 
++/**
++ * 앞 판(2026.11.07-b)에서 추가한 확장은 백그라운드·팝업 정보 없이 저장되어 있다
++ * → 함께 저장해 둔 manifest.json 에서 다시 읽어 채운다 (다시 올리지 않아도 팝업·백그라운드가 켜지게)
++ */
++function completeRecord(ext: ExtensionRecord): ExtensionRecord {
++    if (ext.manifest || !ext.files || !ext.files['manifest.json']) {
++        return ext;
++    }
++    try {
++        const has = (p: string) => !!ext.files[p];
++        const text = (p: string) => stripBom(new TextDecoder().decode(new Uint8Array(ext.files[p])));
++        const manifest = JSON.parse(text('manifest.json'));
++        const bg = manifest.background || {};
++        let background: string[] = [];
++        if (bg.service_worker) {
++            background = [String(bg.service_worker)];
++        } else if (Array.isArray(bg.scripts)) {
++            background = bg.scripts.map(String);
++        } else if (bg.page && has(String(bg.page).replace(/^\//, ''))) {
++            const html = new DOMParser().parseFromString(text(String(bg.page).replace(/^\//, '')), 'text/html');
++            background = Array.from(html.querySelectorAll('script[src]')).map((s) => String(s.getAttribute('src')));
++        }
++        background = background.map((p) => p.replace(/^\.?\//, '')).filter(has);
++        const act = manifest.action || manifest.browser_action || manifest.page_action || {};
++        const popupPath = act.default_popup ? String(act.default_popup).replace(/^\.?\//, '').split(/[?#]/)[0] : '';
++        return { ...ext, manifest, background, popup: popupPath && has(popupPath) ? popupPath : undefined };
++    } catch (e) {
++        return ext;
++    }
++}
++
+ export async function listExtensions(): Promise<ExtensionRecord[]> {
+     try {
+         const all = ((await tx('readonly', (s) => s.getAll())) || []) as ExtensionRecord[];
+-        return all.sort((a, b) => a.addedAt - b.addedAt);
++        return all.map(completeRecord).sort((a, b) => a.addedAt - b.addedAt);
+     } catch (e) {
+         console.warn('extensions: list failed', e);
+         return [];
