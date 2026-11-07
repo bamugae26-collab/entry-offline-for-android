@@ -1,0 +1,1170 @@
+diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
+index d6f01dc0..30bf4de8 100644
+--- a/src/common/buildInfo.ts
++++ b/src/common/buildInfo.ts
+@@ -6,7 +6,7 @@
+  *   - ENTRY_LOCAL_BUILD: 같은 버전 안에서 어떤 패치로 빌드됐는지 구별하는 날짜 번호
+  */
+ export const APP_VERSION = '1.2.0';
+-export const ENTRY_LOCAL_BUILD = '2026.11.07-b'; // 확장 프로그램(.crx) 올리기
++export const ENTRY_LOCAL_BUILD = '2026.11.07-c'; // 확장 프로그램 백그라운드·팝업(톱니바퀴 메뉴)
+ 
+ /** 앱 이름 (안드로이드 / Windows) */
+ export const APP_NAME_ANDROID = 'Entry for Android';
+diff --git a/src/renderer/components/header.scss b/src/renderer/components/header.scss
+index 3f7d4bca..5218c851 100644
+--- a/src/renderer/components/header.scss
++++ b/src/renderer/components/header.scss
+@@ -481,9 +481,15 @@
+     top: 40px;
+     right: -5px;
+     z-index: 1000;
+-    width: 136px;
++    width: auto;
++    min-width: 136px;
+     box-sizing: border-box;
+-    overflow: hidden;
++    /* 확장 프로그램 팝업이 여러 개면 화면 밖으로 밀리지 않게 메뉴 안에서 스크롤 */
++    max-height: calc(100vh - 56px);
++    overflow-x: hidden;
++    overflow-y: auto;
++    overscroll-behavior: contain;
++    -webkit-overflow-scrolling: touch;
+     border: 1px solid #2350d6;
+     border-radius: 12px;
+     background: #295dea;
+@@ -528,6 +534,37 @@
+     height: 20px;
+     fill: #fff;
+ }
++.entry_local_settings_menu .esm_ext_popups:empty {
++    display: none;
++}
++.entry_local_settings_menu .esm_ext {
++    padding: 10px 10px 12px;
++    border-top: 1px solid #1f4fd2;
++    box-shadow: inset 0 1px 0 #3c6aeb;
++}
++.entry_local_settings_menu .esm_ext_title {
++    display: flex;
++    align-items: center;
++    margin: 0 0 8px 4px;
++    color: #fff;
++    font-size: 13px;
++    font-weight: bold;
++    white-space: nowrap;
++}
++.entry_local_settings_menu .esm_ext_title img {
++    width: 18px;
++    height: 18px;
++    margin-right: 6px;
++    border-radius: 4px;
++}
++.entry_local_settings_menu .esm_ext_frame {
++    display: block;
++    width: 320px;
++    height: 120px;
++    border: 0;
++    border-radius: 8px;
++    background: #fff;
++}
+ .entry_local_settings_menu .esm_glyph {
+     font-size: 21px;
+     font-weight: bold;
+diff --git a/src/renderer/components/header.tsx b/src/renderer/components/header.tsx
+index 703265cc..64d25fc2 100644
+--- a/src/renderer/components/header.tsx
++++ b/src/renderer/components/header.tsx
+@@ -15,7 +15,7 @@ import styled from 'styled-components';
+ import { lt } from '../../common/localLang';
+ import { getPerformanceSettings } from '../helper/entry/performance';
+ import { openPrintView } from '../helper/printProject';
+-import { openExtensionPopup } from '../helper/extensions';
++import { openExtensionPopup, mountExtensionPopups } from '../helper/extensionHost';
+ import { showLoginAlert } from '../helper/loginAlert';
+ import { showAppInfo } from '../helper/appInfoAlert';
+ import { accountLabel, accountsAvailable, cloudAvailable, cloudReady, getCloudState, subscribeCloud } from '../helper/cloudState';
+@@ -203,6 +203,8 @@ class Header extends Component<IProps, IState> {
+                     </span>
+                     <span className={'esm_text'}>{isEn ? 'English' : '한국어'}</span>
+                 </button>}
++                {/* [1.2] 켜 둔 확장 프로그램의 팝업 창 (크롬 툴바의 확장 아이콘 창) — 여러 개면 메뉴 안에서 스크롤 */}
++                <div className={'esm_ext_popups'} ref={mountExtensionPopups} />
+             </div>
+         );
+     }
+diff --git a/src/renderer/components/workspace.tsx b/src/renderer/components/workspace.tsx
+index 54da05d5..d04b8c30 100644
+--- a/src/renderer/components/workspace.tsx
++++ b/src/renderer/components/workspace.tsx
+@@ -63,7 +63,7 @@ import { installBackpack } from '../helper/backpack';
+ import { installPaintRoom } from '../helper/paintRoom';
+ import { installInputCaretFix } from '../helper/inputCaretFix';
+ import { installHardwareLite, applyHardwareInitOption } from '../helper/hardwareLite';
+-import { startExtensions } from '../helper/extensions';
++import { startExtensions } from '../helper/extensionHost';
+ import { installTouchSliders } from '../helper/touchSliders';
+ import { lt, setMainLang, currentLang } from '../../common/localLang';
+ 
+diff --git a/src/renderer/helper/extensionHost.ts b/src/renderer/helper/extensionHost.ts
+new file mode 100644
+index 00000000..1e7bbdc2
+--- /dev/null
++++ b/src/renderer/helper/extensionHost.ts
+@@ -0,0 +1,1056 @@
++import { lt } from '../../common/localLang';
++import { DEFAULT_EXTENSION_ICON } from './extensionIcon';
++
++/**
++ * [entry-local 1.2] 확장 프로그램 — 크롬 웹 스토어의 '엔트리용 확장 프로그램'(.crx)을 앱에서 쓰기
++ *
++ * 엔트리용 확장 프로그램은 대부분 playentry.org 화면에 스크립트(content_scripts)를 넣어
++ * window.Entry 를 고치는 방식이다. 이 앱도 같은 Entry 를 쓰므로 그 스크립트를 그대로 넣으면 된다.
++ *  - .crx(크롬 확장 파일) = 머리말 + zip → manifest.json 의 content_scripts 중 playentry.org 에 붙는 것만 쓴다
++ *  - world: "MAIN" 스크립트는 그대로, 기본(ISOLATED) 스크립트는 chrome.* 대신(runtime·tabs·scripting·storage·i18n)과 함께 넣는다
++ *  - 백그라운드(서비스 워커)도 같은 화면 안에서 돌리고, 팝업 창(확장 아이콘 창)은 톱니바퀴 메뉴 안에 보여 준다
++ *  - 확장 스크립트에게는 주소(location)가 엔트리 만들기 화면(playentry.org/ws/new)으로 보인다
++ *  - 추가한 확장은 이 기기(IndexedDB)에 저장되어 앱을 켤 때마다 자동으로 켜진다
++ *  - 끄거나 지운 확장은 이미 들어간 스크립트를 되돌릴 수 없으므로 앱을 다시 시작해야 완전히 빠진다
++ * 크롬에만 있는 기능(새 탭·알림·다운로드 등)은 없으므로 그런 기능에 기대는 확장은 일부만 동작할 수 있다.
++ */
++
++type ContentScript = { world: 'MAIN' | 'ISOLATED'; js: string[]; css: string[] };
++
++export type ExtensionRecord = {
++    id: string;
++    name: string;
++    version: string;
++    description: string;
++    icon: string;
++    enabled: boolean;
++    addedAt: number;
++    scripts: ContentScript[];
++    /** 확장 안의 파일 (경로 → 내용) — 스크립트·스타일과 chrome.runtime.getURL 로 쓰는 그림 등 */
++    files: Record<string, ArrayBuffer>;
++    messages: Record<string, string>;
++    /** 백그라운드(서비스 워커) 스크립트 */
++    background?: string[];
++    /** 확장 아이콘을 누르면 뜨는 팝업 창 (html) */
++    popup?: string;
++    manifest?: any;
++};
++
++const MAX_SIZE = 30 * 1024 * 1024;
++const ENTRY_PAGES = ['https://playentry.org/ws/new', 'https://playentry.org/ws/', 'https://playentry.org/project/', 'https://playentry.org/'];
++
++// ── .crx 읽기 ──
++
++class ExtensionError extends Error {}
++
++/** 글 맨 앞의 BOM(보이지 않는 표시 글자) 빼기 */
++function stripBom(text: string) {
++    return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
++}
++
++/** zip 의 deflate 묶음 풀기 — gzip 모양으로 감싸 브라우저의 DecompressionStream('gzip')으로 (크롬 80+, 안드로이드 웹뷰·Windows 둘 다) */
++async function inflateRaw(data: Uint8Array, crc: number, size: number) {
++    const DS = (window as any).DecompressionStream;
++    if (!DS) {
++        throw new ExtensionError(lt('이 기기에서는 압축을 풀 수 없습니다.', 'This device cannot unpack the file.'));
++    }
++    const gz = new Uint8Array(10 + data.length + 8);
++    gz.set([0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff]);
++    gz.set(data, 10);
++    const view = new DataView(gz.buffer);
++    view.setUint32(10 + data.length, crc >>> 0, true);
++    view.setUint32(14 + data.length, size >>> 0, true);
++    const stream = new Blob([gz]).stream().pipeThrough(new DS('gzip'));
++    return new Uint8Array(await new Response(stream).arrayBuffer());
++}
++
++async function unzip(buf: Uint8Array) {
++    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
++    let eocd = -1;
++    for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
++        if (view.getUint32(i, true) === 0x06054b50) {
++            eocd = i;
++            break;
++        }
++    }
++    if (eocd < 0) {
++        throw new ExtensionError(lt('확장 프로그램 파일이 손상되었습니다.', 'The extension file is damaged.'));
++    }
++    const count = view.getUint16(eocd + 10, true);
++    let p = view.getUint32(eocd + 16, true);
++    const decoder = new TextDecoder();
++    const files = new Map<string, Uint8Array>();
++    for (let n = 0; n < count; n++) {
++        if (view.getUint32(p, true) !== 0x02014b50) {
++            throw new ExtensionError(lt('확장 프로그램 파일이 손상되었습니다.', 'The extension file is damaged.'));
++        }
++        const method = view.getUint16(p + 10, true);
++        const crc = view.getUint32(p + 16, true);
++        const compSize = view.getUint32(p + 20, true);
++        const size = view.getUint32(p + 24, true);
++        const nameLen = view.getUint16(p + 28, true);
++        const extraLen = view.getUint16(p + 30, true);
++        const commentLen = view.getUint16(p + 32, true);
++        const local = view.getUint32(p + 42, true);
++        const name = decoder.decode(buf.subarray(p + 46, p + 46 + nameLen)).replace(/\\/g, '/');
++        p += 46 + nameLen + extraLen + commentLen;
++        if (name.endsWith('/')) {
++            continue;
++        }
++        const start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
++        const raw = buf.subarray(start, start + compSize);
++        if (method === 0) {
++            files.set(name, raw.slice());
++        } else if (method === 8) {
++            files.set(name, await inflateRaw(raw, crc, size));
++        }
++    }
++    return files;
++}
++
++/** .crx = 'Cr24' + 판(2·3) + 서명 머리말 + zip */
++function zipFromCrx(buf: Uint8Array) {
++    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
++    if (buf.length < 16 || view.getUint32(0, false) !== 0x43723234) {
++        throw new ExtensionError(lt('crx 형식의 확장 프로그램 파일이 아닙니다.', 'This is not a .crx extension file.'));
++    }
++    const version = view.getUint32(4, true);
++    const start = version === 2 ? 16 + view.getUint32(8, true) + view.getUint32(12, true) : 12 + view.getUint32(8, true);
++    return buf.subarray(start);
++}
++
++function globToRegExp(glob: string) {
++    return new RegExp(`^${glob.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
++}
++
++/** 확장의 matches 가 엔트리 만들기 화면(playentry.org)에 붙는가 */
++function matchesEntry(pattern: string) {
++    if (pattern === '<all_urls>') {
++        return true;
++    }
++    const m = /^(\*|https?):\/\/([^/]+)(\/.*)$/.exec(pattern);
++    if (!m) {
++        return false;
++    }
++    const host = m[2];
++    if (!(host === '*' || host === 'playentry.org' || host === '*.playentry.org')) {
++        return false;
++    }
++    const path = globToRegExp(m[3]);
++    return ENTRY_PAGES.some((url) => path.test(url.replace(/^https:\/\/playentry\.org/, '')));
++}
++
++function toBuffer(data: Uint8Array) {
++    return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
++}
++
++function mimeOf(path: string) {
++    const ext = path.split('.').pop()!.toLowerCase();
++    return (
++        ({
++            png: 'image/png',
++            jpg: 'image/jpeg',
++            jpeg: 'image/jpeg',
++            gif: 'image/gif',
++            svg: 'image/svg+xml',
++            webp: 'image/webp',
++            js: 'text/javascript',
++            css: 'text/css',
++            json: 'application/json',
++            html: 'text/html',
++            mp3: 'audio/mpeg',
++            wav: 'audio/wav',
++            ogg: 'audio/ogg',
++            woff: 'font/woff',
++            woff2: 'font/woff2',
++            ttf: 'font/ttf',
++        } as Record<string, string>)[ext] || 'application/octet-stream'
++    );
++}
++
++async function toDataUrl(data: Uint8Array, mime: string) {
++    return new Promise<string>((resolve) => {
++        const r = new FileReader();
++        r.onload = () => resolve(String(r.result));
++        r.onerror = () => resolve('');
++        r.readAsDataURL(new Blob([data], { type: mime }));
++    });
++}
++
++/** 확장 프로그램 파일 → 기록 (엔트리에 붙는 스크립트가 없으면 거절) */
++export async function readExtensionFile(file: File): Promise<ExtensionRecord> {
++    if (file.size > MAX_SIZE) {
++        throw new ExtensionError(lt('파일이 너무 큽니다 (30MB 이하).', 'The file is too large (30 MB max).'));
++    }
++    const files = await unzip(zipFromCrx(new Uint8Array(await file.arrayBuffer())));
++    const text = (path: string) => stripBom(new TextDecoder().decode(files.get(path)!));
++    if (!files.has('manifest.json')) {
++        throw new ExtensionError(lt('확장 프로그램 정보(manifest.json)가 없습니다.', 'manifest.json is missing.'));
++    }
++    let manifest: any;
++    try {
++        manifest = JSON.parse(text('manifest.json'));
++    } catch (e) {
++        throw new ExtensionError(lt('확장 프로그램 정보(manifest.json)를 읽을 수 없습니다.', 'manifest.json cannot be read.'));
++    }
++    // 다국어 이름 (__MSG_이름__) — 한국어 → 기본 언어 → 영어
++    const messages: Record<string, string> = {};
++    const locales = [manifest.default_locale, 'en', lt('ko', 'en')].filter(Boolean);
++    locales.forEach((loc: string) => {
++        const path = `_locales/${loc}/messages.json`;
++        if (files.has(path)) {
++            try {
++                const json = JSON.parse(text(path));
++                Object.keys(json).forEach((k) => (messages[k.toLowerCase()] = json[k] && json[k].message));
++            } catch (e) {
++                // 무시
++            }
++        }
++    });
++    const msg = (s: any) => String(s || '').replace(/__MSG_(\w+)__/g, (all, key) => messages[key.toLowerCase()] ?? all);
++
++    const scripts: ContentScript[] = [];
++    (manifest.content_scripts || []).forEach((cs: any) => {
++        if (!(cs.matches || []).some(matchesEntry)) {
++            return;
++        }
++        const js = (cs.js || []).map((p: string) => p.replace(/^\//, '')).filter((p: string) => files.has(p));
++        const css = (cs.css || []).map((p: string) => p.replace(/^\//, '')).filter((p: string) => files.has(p));
++        if (js.length || css.length) {
++            scripts.push({ world: cs.world === 'MAIN' ? 'MAIN' : 'ISOLATED', js, css });
++        }
++    });
++    if (!scripts.length) {
++        throw new ExtensionError(
++            lt(
++                `'${msg(manifest.name) || file.name}'은(는) 엔트리에서 호환되지 않는 확장 프로그램입니다.\n(엔트리 화면에 붙는 기능이 없습니다)`,
++                `'${msg(manifest.name) || file.name}' is not compatible with Entry.\n(It has nothing that runs on the Entry editor.)`
++            )
++        );
++    }
++
++    // 아이콘: 128 → 가장 큰 것
++    let icon = '';
++    const icons = manifest.icons || {};
++    const iconPath = Object.keys(icons)
++        .sort((a, b) => Math.abs(128 - Number(a)) - Math.abs(128 - Number(b)))
++        .map((k) => String(icons[k]).replace(/^\//, ''))
++        .find((p) => files.has(p));
++    if (iconPath) {
++        icon = await toDataUrl(files.get(iconPath)!, mimeOf(iconPath));
++    }
++
++    // 백그라운드: MV3 service_worker / MV2 scripts · page(html 안의 script)
++    const bg = manifest.background || {};
++    let background: string[] = [];
++    if (bg.service_worker) {
++        background = [String(bg.service_worker)];
++    } else if (Array.isArray(bg.scripts)) {
++        background = bg.scripts.map(String);
++    } else if (bg.page && files.has(String(bg.page).replace(/^\//, ''))) {
++        const html = new DOMParser().parseFromString(text(String(bg.page).replace(/^\//, '')), 'text/html');
++        background = Array.from(html.querySelectorAll('script[src]')).map((s) => String(s.getAttribute('src')));
++    }
++    background = background.map((p) => p.replace(/^\.?\//, '')).filter((p) => files.has(p));
++    const act = manifest.action || manifest.browser_action || manifest.page_action || {};
++    const popupPath = act.default_popup ? String(act.default_popup).replace(/^\.?\//, '').split(/[?#]/)[0] : '';
++    const popup = popupPath && files.has(popupPath) ? popupPath : undefined;
++
++    const kept: Record<string, ArrayBuffer> = {};
++    files.forEach((data, path) => {
++        if (!path.startsWith('_metadata/')) {
++            kept[path] = toBuffer(data);
++        }
++    });
++    const name = msg(manifest.name) || file.name.replace(/\.crx$/i, '');
++    return {
++        id: `ext:${name}`,
++        name,
++        version: String(manifest.version || ''),
++        description: msg(manifest.description),
++        icon,
++        enabled: true,
++        addedAt: Date.now(),
++        scripts,
++        files: kept,
++        messages,
++        background,
++        popup,
++        manifest,
++    };
++}
++
++// ── 저장 (이 기기) ──
++
++const DB_NAME = 'entry-local-extensions';
++const STORE = 'extensions';
++
++function openDb(): Promise<IDBDatabase> {
++    return new Promise((resolve, reject) => {
++        const req = indexedDB.open(DB_NAME, 1);
++        req.onupgradeneeded = () => req.result.createObjectStore(STORE, { keyPath: 'id' });
++        req.onsuccess = () => resolve(req.result);
++        req.onerror = () => reject(req.error);
++    });
++}
++
++async function tx<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T> | void): Promise<T | undefined> {
++    const db = await openDb();
++    return new Promise((resolve, reject) => {
++        const t = db.transaction(STORE, mode);
++        const req = fn(t.objectStore(STORE));
++        t.oncomplete = () => {
++            db.close();
++            resolve(req ? req.result : undefined);
++        };
++        t.onerror = () => {
++            db.close();
++            reject(t.error);
++        };
++    });
++}
++
++export async function listExtensions(): Promise<ExtensionRecord[]> {
++    try {
++        const all = ((await tx('readonly', (s) => s.getAll())) || []) as ExtensionRecord[];
++        return all.sort((a, b) => a.addedAt - b.addedAt);
++    } catch (e) {
++        console.warn('extensions: list failed', e);
++        return [];
++    }
++}
++
++async function saveExtension(ext: ExtensionRecord) {
++    await tx('readwrite', (s) => s.put(ext));
++}
++
++async function removeExtension(id: string) {
++    await tx('readwrite', (s) => s.delete(id));
++}
++
++// ── 실행 ──
++// 크롬에서 확장은 세 곳에서 돈다: 백그라운드(서비스 워커) · 페이지에 넣는 스크립트(content) · 팝업 창.
++// 이 앱에서는 모두 같은 화면 안에서 돌리고, 셋 사이의 chrome.runtime/tabs 메시지·chrome.storage 를 여기서 이어 준다.
++
++type Ctx = 'background' | 'content' | 'popup';
++type Listener = (...args: any[]) => any;
++
++/** 확장 하나의 연락망 (메시지·저장소 변경을 받는 함수들) */
++type Bus = {
++    ext: ExtensionRecord;
++    getURL: (p: string) => string;
++    rawURL: (p: string) => string;
++    message: Record<Ctx, Set<Listener>>;
++    storage: Set<Listener>;
++};
++
++const running = new Map<string, string>(); // id → 켠 판(version)
++const buses = new Map<string, Bus>();
++const api: Record<string, any> = ((window as any).__entryLocalExtensions = (window as any).__entryLocalExtensions || {});
++
++/** 이 앱의 주소는 playentry.org 가 아니다 → 확장 스크립트에게는 엔트리 만들기 화면 주소로 보이게 */
++const ENTRY_URL = 'https://playentry.org/ws/new';
++const LOC = '__entryLocalPlayentryLocation';
++(window as any)[LOC] = (() => {
++    const u = new URL(ENTRY_URL);
++    const real = () => window.location;
++    const loc: any = {
++        assign: (url: string) => real().assign(url),
++        replace: (url: string) => real().replace(url),
++        reload: () => real().reload(),
++        toString: () => u.href,
++        ancestorOrigins: real().ancestorOrigins,
++    };
++    ['href', 'origin', 'protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash'].forEach((k) =>
++        Object.defineProperty(loc, k, { get: () => (u as any)[k], set: () => undefined, enumerable: true })
++    );
++    return loc;
++})();
++const TAB = { id: 1, windowId: 1, index: 0, active: true, highlighted: true, selected: true, pinned: false, incognito: false, status: 'complete', url: ENTRY_URL, title: '엔트리' };
++
++function fileText(ext: ExtensionRecord, path: string) {
++    return stripBom(new TextDecoder().decode(new Uint8Array(ext.files[path])));
++}
++
++/** 페이지(MAIN)에 넣는 코드: location 만 엔트리 주소로 바꿔 보이게 (var·function 은 그대로 전역) */
++function wrapMain(code: string, name: string) {
++    return `{ const location = window.${LOC};\n${code}\n}\n//# sourceURL=entry-extension/${name}`;
++}
++
++/** chrome.* 를 쓰는 코드(content·백그라운드): 확장 전용 chrome 을 넘겨 준다 */
++function wrapWithApi(code: string, ref: string, name: string) {
++    return `(function (chrome, browser) { const location = window.${LOC};\n${code}\n}).call(window, ${ref}, ${ref});\n//# sourceURL=entry-extension/${name}`;
++}
++
++function addScript(code: string) {
++    const s = document.createElement('script');
++    s.textContent = code;
++    (document.head || document.documentElement).appendChild(s);
++    s.remove();
++}
++
++function addStyle(ext: ExtensionRecord, css: string, getURL: (p: string) => string) {
++    const style = document.createElement('style');
++    style.setAttribute('data-entry-extension', ext.name);
++    style.textContent = css.replace(/chrome-extension:\/\/__MSG_@@extension_id__\/([^)"']+)/g, (all, p) => getURL(p));
++    document.head.appendChild(style);
++}
++
++/** 확장 안 파일 주소 (chrome.runtime.getURL) — 스크립트는 페이지에 넣을 모양으로, 나머지는 그대로 blob 주소 */
++function urlMakers(ext: ExtensionRecord) {
++    const raw: Record<string, string> = {};
++    const wrapped: Record<string, string> = {};
++    const clean = (path: string) => String(path || '').replace(/^chrome-extension:\/\/[^/]+\//, '').replace(/^\.?\//, '').split(/[?#]/)[0];
++    const rawURL = (path: string) => {
++        const p = clean(path);
++        if (!ext.files[p]) {
++            return String(path || '');
++        }
++        if (!raw[p]) {
++            raw[p] = URL.createObjectURL(new Blob([ext.files[p]], { type: mimeOf(p) }));
++        }
++        return raw[p];
++    };
++    const getURL = (path: string) => {
++        const p = clean(path);
++        if (!/\.m?js$/i.test(p) || !ext.files[p]) {
++            return rawURL(path);
++        }
++        if (!wrapped[p]) {
++            wrapped[p] = URL.createObjectURL(new Blob([wrapMain(fileText(ext, p), `${encodeURIComponent(ext.name)}/${p}`)], { type: 'text/javascript' }));
++        }
++        return wrapped[p];
++    };
++    return { getURL, rawURL };
++}
++
++function copy<T>(v: T): T {
++    if (v === undefined) {
++        return v;
++    }
++    try {
++        return (window as any).structuredClone ? (window as any).structuredClone(v) : JSON.parse(JSON.stringify(v));
++    } catch (e) {
++        return v;
++    }
++}
++
++/** 메시지 보내기: 받는 쪽 함수들 중 처음 답한 값 (아무도 답하지 않으면 undefined) */
++function deliver(bus: Bus, targets: Ctx[], message: any, sender: any): Promise<any> {
++    return new Promise((resolve) => {
++        setTimeout(() => {
++            let done = false;
++            let waiting = false;
++            const respond = (value?: any) => {
++                if (!done) {
++                    done = true;
++                    resolve(copy(value));
++                }
++            };
++            targets.forEach((t) =>
++                bus.message[t].forEach((fn) => {
++                    try {
++                        const r = fn(copy(message), sender, respond);
++                        if (r === true) {
++                            waiting = true;
++                        } else if (r && typeof r.then === 'function') {
++                            waiting = true;
++                            r.then(respond, () => respond(undefined));
++                        }
++                    } catch (e) {
++                        console.warn(`extension ${bus.ext.name}: message listener failed`, e);
++                    }
++                })
++            );
++            if (!waiting) {
++                respond(undefined);
++            }
++        });
++    });
++}
++
++/** 마지막 인자가 함수면 콜백으로도 알려 준다 (크롬 예전 방식) */
++function withCallback(args: any[], run: (args: any[]) => Promise<any>) {
++    const cb = typeof args[args.length - 1] === 'function' ? args.pop() : null;
++    const p = run(args);
++    if (cb) {
++        p.then((v) => cb(v), () => cb(undefined));
++    }
++    return p;
++}
++
++function notifyRestart() {
++    toast(lt('확장 프로그램', 'Extensions'), lt('확장 프로그램 설정을 바꿨어요. 끈 기능은 앱을 다시 시작하면 빠집니다.', 'Extension settings changed. Restart the app to remove features you turned off.'));
++}
++
++/** 확장 전용 chrome.* — ctx(백그라운드·content·팝업)마다 따로 만들고, 메시지·저장소는 연락망으로 잇는다 */
++function makeApi(bus: Bus, ctx: Ctx) {
++    const { ext, getURL } = bus;
++    const mine: Array<[Set<Listener>, Listener]> = [];
++    const event = (set: Set<Listener>) => ({
++        addListener: (f: Listener) => {
++            set.add(f);
++            mine.push([set, f]);
++        },
++        removeListener: (f: Listener) => set.delete(f),
++        hasListener: (f: Listener) => set.has(f),
++        hasListeners: () => set.size > 0,
++    });
++    const dummyEvent = () => event(new Set());
++    const key = `entry-local-ext:${ext.id}`;
++    const read = (): Record<string, any> => {
++        try {
++            return JSON.parse(localStorage.getItem(key) || '{}');
++        } catch (e) {
++            return {};
++        }
++    };
++    const write = (data: Record<string, any>, changes: Record<string, any>) => {
++        try {
++            localStorage.setItem(key, JSON.stringify(data));
++        } catch (e) {
++            // 저장 못 함
++        }
++        if (Object.keys(changes).length) {
++            setTimeout(() => bus.storage.forEach((fn) => {
++                try {
++                    fn(copy(changes), 'local');
++                } catch (e) {
++                    console.warn(e);
++                }
++            }));
++        }
++    };
++    const pick = (keys: any) => {
++        const all = read();
++        if (keys == null) {
++            return all;
++        }
++        if (typeof keys === 'string') {
++            return keys in all ? { [keys]: all[keys] } : {};
++        }
++        if (Array.isArray(keys)) {
++            return keys.reduce((o: any, k: string) => (k in all && (o[k] = all[k]), o), {});
++        }
++        return Object.keys(keys).reduce((o: any, k) => ((o[k] = k in all ? all[k] : keys[k]), o), {});
++    };
++    const area = {
++        get: (...args: any[]) => withCallback(args, ([keys]) => Promise.resolve(copy(pick(keys)))),
++        set: (...args: any[]) =>
++            withCallback(args, ([items]) => {
++                const all = read();
++                const changes: Record<string, any> = {};
++                Object.keys(items || {}).forEach((k) => {
++                    changes[k] = { oldValue: all[k], newValue: copy(items[k]) };
++                    all[k] = copy(items[k]);
++                });
++                write(all, changes);
++                return Promise.resolve();
++            }),
++        remove: (...args: any[]) =>
++            withCallback(args, ([keys]) => {
++                const all = read();
++                const changes: Record<string, any> = {};
++                [].concat(keys).forEach((k: string) => {
++                    if (k in all) {
++                        changes[k] = { oldValue: all[k] };
++                        delete all[k];
++                    }
++                });
++                write(all, changes);
++                return Promise.resolve();
++            }),
++        clear: (...args: any[]) =>
++            withCallback(args, () => {
++                const all = read();
++                const changes: Record<string, any> = {};
++                Object.keys(all).forEach((k) => (changes[k] = { oldValue: all[k] }));
++                write({}, changes);
++                return Promise.resolve();
++            }),
++        getBytesInUse: (...args: any[]) => withCallback(args, () => Promise.resolve((localStorage.getItem(key) || '').length)),
++        onChanged: event(bus.storage),
++    };
++    const sender = () =>
++        ctx === 'content'
++            ? { id: ext.id, tab: { ...TAB }, frameId: 0, url: ENTRY_URL, origin: 'https://playentry.org' }
++            : { id: ext.id, url: `chrome-extension://${ext.id}/${ctx}` };
++    const sendRuntime = (...args: any[]) =>
++        withCallback(args, (a) => {
++            // (확장 id, 메시지, 설정) 또는 (메시지, 설정)
++            const message = typeof a[0] === 'string' && a.length > 1 ? a[1] : a[0];
++            const targets: Ctx[] = ctx === 'content' ? ['background', 'popup'] : ctx === 'popup' ? ['background'] : ['popup'];
++            return deliver(bus, targets, message, sender());
++        });
++    const portStub = () => ({
++        name: '',
++        postMessage: () => undefined,
++        disconnect: () => undefined,
++        onMessage: dummyEvent(),
++        onDisconnect: dummyEvent(),
++    });
++    const resolved = (v?: any) => (...args: any[]) => withCallback(args, () => Promise.resolve(v));
++    const tabs = {
++        query: (...args: any[]) => withCallback(args, () => Promise.resolve([{ ...TAB }])),
++        get: (...args: any[]) => withCallback(args, () => Promise.resolve({ ...TAB })),
++        getCurrent: (...args: any[]) => withCallback(args, () => Promise.resolve(ctx === 'content' ? { ...TAB } : undefined)),
++        sendMessage: (...args: any[]) => withCallback(args, (a) => deliver(bus, ['content'], a[1], { id: ext.id, url: `chrome-extension://${ext.id}/${ctx}` })),
++        reload: (...args: any[]) =>
++            withCallback(args, () => {
++                // 앱 전체를 다시 불러오면 만들던 작품이 날아갈 수 있으므로 알리기만 한다
++                notifyRestart();
++                return Promise.resolve();
++            }),
++        create: (...args: any[]) =>
++            withCallback(args, ([props]) => {
++                props && props.url && window.open(props.url, '_blank');
++                return Promise.resolve({ ...TAB, id: 2, url: props && props.url });
++            }),
++        update: resolved({ ...TAB }),
++        onUpdated: dummyEvent(),
++        onActivated: dummyEvent(),
++        onRemoved: dummyEvent(),
++    };
++    const scripting = {
++        executeScript: (...args: any[]) =>
++            withCallback(args, ([inj]) => {
++                const results: any[] = [];
++                const ref = `window.__entryLocalExtensions[${JSON.stringify(ext.id)}].content`;
++                (inj.files || []).forEach((path: string) => {
++                    const p = String(path).replace(/^\//, '');
++                    if (!ext.files[p]) {
++                        return;
++                    }
++                    const name = `${encodeURIComponent(ext.name)}/${p}`;
++                    addScript(inj.world === 'MAIN' ? wrapMain(fileText(ext, p), name) : wrapWithApi(fileText(ext, p), ref, name));
++                    results.push({ frameId: 0, result: undefined });
++                });
++                if (typeof inj.func === 'function' || typeof inj.function === 'function') {
++                    let result;
++                    try {
++                        result = (inj.func || inj.function).apply(window, inj.args || []);
++                    } catch (e) {
++                        return Promise.reject(e);
++                    }
++                    return Promise.resolve(result).then((r) => [{ frameId: 0, result: r }]);
++                }
++                return Promise.resolve(results);
++            }),
++        insertCSS: (...args: any[]) =>
++            withCallback(args, ([inj]) => {
++                inj.css && addStyle(ext, inj.css, getURL);
++                (inj.files || []).forEach((p: string) => ext.files[p.replace(/^\//, '')] && addStyle(ext, fileText(ext, p.replace(/^\//, '')), getURL));
++                return Promise.resolve();
++            }),
++        removeCSS: resolved(),
++    };
++    const noop = resolved();
++    const action = {
++        setBadgeText: noop,
++        setBadgeBackgroundColor: noop,
++        setTitle: noop,
++        setIcon: noop,
++        setPopup: noop,
++        enable: noop,
++        disable: noop,
++        onClicked: dummyEvent(),
++    };
++    const chromeApi = {
++        runtime: {
++            id: ext.id,
++            getURL: ctx === 'popup' ? bus.rawURL : getURL,
++            getManifest: () => copy(ext.manifest || { name: ext.name, version: ext.version, description: ext.description }),
++            sendMessage: sendRuntime,
++            onMessage: event(bus.message[ctx]),
++            onMessageExternal: dummyEvent(),
++            onInstalled: event(ctx === 'background' ? installed : new Set()),
++            onStartup: dummyEvent(),
++            onConnect: dummyEvent(),
++            connect: portStub,
++            getPlatformInfo: resolved({ os: 'android', arch: 'arm', nacl_arch: 'arm' }),
++            openOptionsPage: noop,
++            reload: (...args: any[]) => withCallback(args, () => (notifyRestart(), Promise.resolve())),
++            lastError: undefined,
++        },
++        storage: { local: area, sync: area, session: area, managed: area, onChanged: event(bus.storage) },
++        i18n: {
++            getMessage: (name: string, subs?: any) => {
++                let m = ext.messages[String(name).toLowerCase()] || '';
++                [].concat(subs == null ? [] : subs).forEach((s: any, i: number) => (m = m.replace(new RegExp(`\\$${i + 1}`, 'g'), String(s))));
++                return m;
++            },
++            getUILanguage: () => lt('ko', 'en'),
++            getAcceptLanguages: resolved([lt('ko', 'en')]),
++        },
++        tabs,
++        scripting,
++        action,
++        browserAction: action,
++        pageAction: action,
++        extension: { getURL: ctx === 'popup' ? bus.rawURL : getURL },
++        permissions: { contains: resolved(true), request: resolved(true), getAll: resolved({ permissions: [], origins: [] }) },
++        alarms: { create: noop, clear: resolved(true), clearAll: resolved(true), get: resolved(undefined), getAll: resolved([]), onAlarm: dummyEvent() },
++        contextMenus: { create: () => 0, update: noop, remove: noop, removeAll: noop, onClicked: dummyEvent() },
++        windows: { getCurrent: resolved({ id: 1, focused: true }), getAll: resolved([{ id: 1, focused: true }]), create: noop, update: noop },
++    };
++    const dispose = () => mine.forEach(([set, f]) => set.delete(f));
++    return { chromeApi, dispose };
++}
++
++const installed = new Set<Listener>();
++
++function runExtension(ext: ExtensionRecord, justInstalled = false) {
++    if (running.has(ext.id)) {
++        return;
++    }
++    running.set(ext.id, ext.version);
++    const { getURL, rawURL } = urlMakers(ext);
++    const bus: Bus = { ext, getURL, rawURL, message: { background: new Set(), content: new Set(), popup: new Set() }, storage: new Set() };
++    buses.set(ext.id, bus);
++    const name = encodeURIComponent(ext.name);
++    const slot = (api[ext.id] = {
++        content: makeApi(bus, 'content').chromeApi,
++        background: makeApi(bus, 'background').chromeApi,
++        // 팝업 창은 열 때마다 새로 만든다 (닫히면 그 창의 메시지 받기를 거둔다)
++        popup: () => makeApi(bus, 'popup'),
++    });
++    const ref = (k: string) => `window.__entryLocalExtensions[${JSON.stringify(ext.id)}].${k}`;
++    try {
++        // 백그라운드(서비스 워커) — 페이지 안에서 함께 돌린다
++        installed.clear();
++        (ext.background || []).forEach((path) => {
++            if (ext.files[path]) {
++                addScript(wrapWithApi(fileText(ext, path), ref('background'), `${name}/${path}`));
++            }
++        });
++        if (justInstalled && installed.size) {
++            installed.forEach((fn) => setTimeout(() => fn({ reason: 'install' })));
++        }
++    } catch (e) {
++        console.warn(`extension ${ext.name}: background failed`, e);
++    }
++    void slot;
++    ext.scripts.forEach((cs, i) => {
++        cs.css.forEach((path) => addStyle(ext, fileText(ext, path), getURL));
++        if (!cs.js.length) {
++            return;
++        }
++        try {
++            if (cs.world === 'MAIN') {
++                cs.js.forEach((path) => addScript(wrapMain(fileText(ext, path), `${name}/${path}`)));
++            } else {
++                // 같은 묶음의 파일은 한 범위에서 차례로 (크롬의 ISOLATED 세계처럼 서로의 전역 이름을 본다)
++                const body = cs.js.map((path) => fileText(ext, path)).join('\n;\n');
++                addScript(wrapWithApi(body, ref('content'), `${name}/content-${i}.js`));
++            }
++        } catch (e) {
++            console.warn(`extension ${ext.name} failed`, e);
++        }
++    });
++}
++
++let started = false;
++
++/** 앱을 켤 때 (엔트리가 준비된 뒤) 한 번: 켜 둔 확장 실행 */
++export async function startExtensions() {
++    if (started) {
++        return;
++    }
++    started = true;
++    (await listExtensions()).filter((e) => e.enabled).forEach((e) => runExtension(e));
++}
++
++// ── 확장 프로그램 팝업 (톱니바퀴 메뉴 안) ──
++// 크롬 툴바의 확장 아이콘을 누르면 뜨는 작은 창을 톱니바퀴 메뉴 아래에 차례로 보여 준다.
++
++function popupHtml(bus: Bus, popupPath: string, prelude: string) {
++    const dir = popupPath.includes('/') ? popupPath.slice(0, popupPath.lastIndexOf('/') + 1) : '';
++    const doc = new DOMParser().parseFromString(fileText(bus.ext, popupPath), 'text/html');
++    const resolve = (ref: string) => {
++        if (!ref || /^(?:[a-z]+:|\/\/|#)/i.test(ref)) {
++            return null;
++        }
++        const parts = (ref.startsWith('/') ? ref.slice(1) : dir + ref).split('/');
++        const out: string[] = [];
++        parts.forEach((s) => (s === '..' ? out.pop() : s && s !== '.' && out.push(s)));
++        const p = out.join('/').split(/[?#]/)[0];
++        return bus.ext.files[p] ? bus.rawURL(p) : null;
++    };
++    doc.querySelectorAll('[src],[href]').forEach((el) => {
++        ['src', 'href'].forEach((attr) => {
++            const v = el.getAttribute(attr);
++            const url = v && resolve(v);
++            url && el.setAttribute(attr, url);
++        });
++    });
++    const head = doc.head || doc.documentElement;
++    const s = doc.createElement('script');
++    s.textContent = prelude;
++    head.insertBefore(s, head.firstChild);
++    return `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`;
++}
++
++/** 톱니바퀴 메뉴가 열릴 때: 켜져 있고 팝업이 있는 확장마다 팝업 창을 붙인다 */
++export function mountExtensionPopups(container: HTMLElement | null) {
++    if (!container || container.getAttribute('data-mounted')) {
++        return;
++    }
++    container.setAttribute('data-mounted', '1');
++    buses.forEach((bus, id) => {
++        const popupPath = bus.ext.popup;
++        if (!popupPath || !bus.ext.files[popupPath]) {
++            return;
++        }
++        const section = el('div', 'esm_ext');
++        const title = el('div', 'esm_ext_title');
++        const icon = el('img') as HTMLImageElement;
++        icon.src = bus.ext.icon || DEFAULT_EXTENSION_ICON;
++        icon.alt = '';
++        title.appendChild(icon);
++        title.appendChild(el('span', '', bus.ext.name));
++        section.appendChild(title);
++        const frame = el('iframe', 'esm_ext_frame') as HTMLIFrameElement;
++        frame.setAttribute('title', bus.ext.name);
++        const { chromeApi, dispose } = api[id].popup();
++        const key = `__entryLocalPopup${Math.random().toString(36).slice(2)}`;
++        (window as any)[key] = chromeApi;
++        const prelude = `(function(){var c=parent[${JSON.stringify(key)}];try{Object.defineProperty(window,'chrome',{value:c,configurable:true,writable:true});}catch(e){window.chrome=c;}window.browser=c;window.close=function(){};})();`;
++        frame.srcdoc = popupHtml(bus, popupPath, prelude);
++        frame.onload = () => {
++            const doc = frame.contentDocument;
++            if (!doc) {
++                return;
++            }
++            const fit = () => {
++                const body = doc.body;
++                const w = Math.max(body ? body.scrollWidth : 0, doc.documentElement.scrollWidth);
++                const h = Math.max(body ? body.scrollHeight : 0, doc.documentElement.scrollHeight);
++                frame.style.width = `${Math.min(Math.max(w, 200), 480)}px`;
++                frame.style.height = `${Math.max(h, 40)}px`;
++            };
++            fit();
++            try {
++                const RO = (frame.contentWindow as any).ResizeObserver || (window as any).ResizeObserver;
++                RO && new RO(fit).observe(doc.documentElement);
++            } catch (e) {
++                // 크기 맞추기 실패 — 처음 크기 그대로
++            }
++            setTimeout(fit, 300);
++            frame.contentWindow!.addEventListener('pagehide', () => {
++                dispose();
++                delete (window as any)[key];
++            });
++        };
++        section.appendChild(frame);
++        container.appendChild(section);
++    });
++}
++
++// ── '확장 프로그램 올리기' 창 ──
++// 엔트리의 [오브젝트 추가하기 → 파일 올리기] 창과 같은 모양 (엔트리 창 스타일을 그대로 쓴다)
++
++const ROOT_ID = 'entry-local-extensions';
++const CSS = `
++#${ROOT_ID} { position: fixed; inset: 0; z-index: 8990; font-family: inherit; }
++#${ROOT_ID} .popup_wrap__db983 { min-width: 0; }
++#${ROOT_ID} .ele-body { flex: 1; overflow-y: auto; padding: 24px 0; -webkit-overflow-scrolling: touch; }
++#${ROOT_ID} .file_add_list_content__db983 { min-height: 0; overflow: visible; padding: 0 16px; }
++#${ROOT_ID} .ele-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
++#${ROOT_ID} .obj_list__db983 li { position: relative; }
++#${ROOT_ID} .ele-circle { display: inline-flex; align-items: center; justify-content: center; width: 64px; height: 64px; margin-top: 22px;
++  border-radius: 50%; background: #f5f5f5; vertical-align: top; }
++#${ROOT_ID} .ele-circle img { width: 40px; height: 40px; max-width: none; margin: 0; object-fit: contain; }
++#${ROOT_ID} .ele-ver { position: absolute; left: 0; right: 0; top: 92px; font-size: 11px; color: #9aa4ab; text-align: center; }
++#${ROOT_ID} .ele-del { position: absolute; top: 4px; right: 4px; z-index: 20; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 13px;
++  background: rgba(44, 49, 61, .55); color: #fff; font-size: 17px; line-height: 26px; cursor: pointer; }
++#${ROOT_ID} .ele-new { position: absolute; top: 6px; left: 6px; z-index: 20; padding: 1px 6px; border-radius: 9px; background: #4f80ff;
++  color: #fff; font-size: 11px; font-weight: 600; }
++`;
++
++export function closeExtensionPopup() {
++    const root = document.getElementById(ROOT_ID);
++    root && root.remove();
++}
++
++function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string) {
++    const e = document.createElement(tag);
++    cls && (e.className = cls);
++    text != null && (e.textContent = text);
++    return e;
++}
++
++function toast(title: string, message: string, alert = false) {
++    const Entry = (window as any).Entry;
++    if (Entry && Entry.toast) {
++        alert ? Entry.toast.alert(title, message) : Entry.toast.success(title, message);
++    }
++}
++
++type Tile = { ext: ExtensionRecord; selected: boolean; isNew: boolean; removed: boolean };
++
++/** 헤더의 [확장 프로그램] 버튼 */
++export async function openExtensionPopup() {
++    closeExtensionPopup();
++    if (!document.getElementById(`${ROOT_ID}-style`)) {
++        const style = document.createElement('style');
++        style.id = `${ROOT_ID}-style`;
++        style.textContent = CSS;
++        document.head.appendChild(style);
++    }
++    const title = lt('확장 프로그램 올리기', 'Upload extensions');
++    const tiles: Tile[] = (await listExtensions()).map((ext) => ({ ext, selected: ext.enabled, isNew: false, removed: false }));
++
++    const root = el('div');
++    root.id = ROOT_ID;
++    const wrap = el('div', 'popup_wrap__db983');
++    const header = el('header', 'pop_header__db983');
++    header.appendChild(el('h1', '', title));
++    const back = el('button', 'btn_back__db983 imbtn_pop_close__db983');
++    back.appendChild(el('span', 'blind__db983', lt('닫기', 'Close')));
++    back.onclick = closeExtensionPopup;
++    header.appendChild(back);
++    const right = el('div');
++    const add = el('a', 'btn__db983', lt('추가하기', 'Add'));
++    add.setAttribute('role', 'button');
++    right.appendChild(add);
++    header.appendChild(right);
++    wrap.appendChild(header);
++
++    const body = el('div', 'ele-body');
++    const content = el('div', 'section_content__db983 file_add_list_content__db983');
++    const area = el('div', 'list_area__db983');
++    const box = el('div', 'file_add_box__db983');
++    const input = el('input', 'ele-input') as HTMLInputElement;
++    input.type = 'file';
++    input.multiple = true;
++    input.id = `${ROOT_ID}-file`;
++    const upload = el('label', 'upload__db983 imbtn_pop_upload__db983', lt('파일 올리기', 'Upload file'));
++    upload.setAttribute('for', input.id);
++    box.appendChild(upload);
++    box.appendChild(input);
++    area.appendChild(box);
++    const list = el('ul', 'obj_list__db983');
++    area.appendChild(list);
++    content.appendChild(area);
++    const caution = el('div', 'caution_box__db983');
++    caution.appendChild(el('p', 'caution__db983', lt('crx 형식이면서 엔트리에서 호환되는 플러그인만 업로드 할 수 있습니다.', 'Only .crx plugins compatible with Entry can be uploaded.')));
++    content.appendChild(caution);
++    body.appendChild(content);
++    wrap.appendChild(body);
++    root.appendChild(wrap);
++
++    const render = () => {
++        list.textContent = '';
++        tiles
++            .filter((t) => !t.removed)
++            .forEach((t) => {
++                const li = el('li', t.selected ? 'on__db983' : '');
++                li.title = [t.ext.name, t.ext.version && `v${t.ext.version}`, t.ext.description].filter(Boolean).join('\n');
++                const link = el('div', 'link__db983');
++                const thumb = el('div', 'thmb__db983');
++                const circle = el('span', 'ele-circle');
++                const img = el('img') as HTMLImageElement;
++                img.src = t.ext.icon || DEFAULT_EXTENSION_ICON;
++                img.alt = '';
++                img.onerror = () => (img.src = DEFAULT_EXTENSION_ICON);
++                circle.appendChild(img);
++                thumb.appendChild(circle);
++                link.appendChild(thumb);
++                t.ext.version && link.appendChild(el('span', 'ele-ver', `v${t.ext.version}`));
++                link.appendChild(el('em', 'sjt__db983', t.ext.name));
++                link.onclick = () => {
++                    t.selected = !t.selected;
++                    render();
++                };
++                li.appendChild(link);
++                t.isNew && li.appendChild(el('span', 'ele-new', lt('새로', 'New')));
++                const del = el('button', 'ele-del', '×');
++                del.title = lt('지우기', 'Remove');
++                del.onclick = (e) => {
++                    e.stopPropagation();
++                    t.removed = true;
++                    render();
++                };
++                li.appendChild(del);
++                list.appendChild(li);
++            });
++    };
++
++    input.onchange = async () => {
++        const picked = Array.from(input.files || []);
++        input.value = '';
++        for (const file of picked) {
++            try {
++                if (!/\.crx$/i.test(file.name)) {
++                    throw new ExtensionError(lt(`'${file.name}'은(는) crx 형식이 아닙니다.`, `'${file.name}' is not a .crx file.`));
++                }
++                const ext = await readExtensionFile(file);
++                const same = tiles.find((t) => t.ext.id === ext.id);
++                if (same) {
++                    // 같은 확장을 다시 올림 → 새 파일로 바꾼다
++                    same.ext = { ...ext, addedAt: same.ext.addedAt };
++                    same.selected = true;
++                    same.removed = false;
++                    same.isNew = true;
++                } else {
++                    tiles.push({ ext, selected: true, isNew: true, removed: false });
++                }
++            } catch (e) {
++                const message = e instanceof ExtensionError ? e.message : lt(`'${file.name}'을(를) 읽지 못했습니다.`, `Could not read '${file.name}'.`);
++                if (!(e instanceof ExtensionError)) {
++                    console.warn('extension read failed', e);
++                }
++                toast(title, message, true);
++            }
++        }
++        render();
++    };
++
++    add.onclick = async () => {
++        let restart = false;
++        const started: string[] = [];
++        try {
++            for (const t of tiles) {
++                const wasRunning = running.has(t.ext.id);
++                if (t.removed) {
++                    if (!t.isNew) {
++                        await removeExtension(t.ext.id);
++                    }
++                    restart = restart || wasRunning;
++                    continue;
++                }
++                const ext = { ...t.ext, enabled: t.selected };
++                if (t.isNew || ext.enabled !== t.ext.enabled) {
++                    await saveExtension(ext);
++                }
++                if (ext.enabled) {
++                    if (wasRunning && running.get(ext.id) !== ext.version) {
++                        restart = true; // 이미 다른 판이 돌고 있음
++                    } else if (!wasRunning) {
++                        runExtension(ext, t.isNew);
++                        started.push(ext.name);
++                    }
++                } else if (wasRunning) {
++                    restart = true;
++                }
++            }
++        } catch (e) {
++            console.warn('extension save failed', e);
++            toast(title, lt('확장 프로그램을 저장하지 못했습니다.', 'Could not save the extensions.'), true);
++            return;
++        }
++        closeExtensionPopup();
++        if (started.length) {
++            toast(lt('확장 프로그램', 'Extensions'), lt(`${started.join(', ')} 켜짐`, `${started.join(', ')} turned on`));
++        }
++        if (restart) {
++            toast(
++                lt('확장 프로그램', 'Extensions'),
++                lt('끄거나 지운·바꾼 확장 프로그램은 앱을 다시 시작하면 적용됩니다.', 'Restart the app to finish turning off, removing or updating extensions.')
++            );
++        }
++    };
++
++    render();
++    document.body.appendChild(root);
++}
