@@ -1,0 +1,161 @@
+diff --git a/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
+index d50642c7..95eb1edf 100644
+--- a/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
++++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
+@@ -141,6 +141,11 @@ public class EntryAccountPlugin extends Plugin {
+     private void readUser(WebView web, ValueCallback<String> cb) {
+         final String token = UUID.randomUUID().toString();
+         pendingUser.put(token, cb);
++        // 페이지가 넘어가며 스크립트가 사라지거나 요청이 멈추면 답이 영영 안 오므로 10초 뒤 null 로 끝낸다
++        main.postDelayed(() -> {
++            final ValueCallback<String> late = pendingUser.remove(token);
++            if (late != null) late.onReceiveValue("null");
++        }, 10000);
+         web.evaluateJavascript(
+             "Promise.resolve().then(() => " + USER_SCRIPT + ")" +
+             ".then((u) => EntryLocalUser.done('" + token + "', JSON.stringify(u === undefined ? null : u)))" +
+@@ -219,6 +224,27 @@ public class EntryAccountPlugin extends Plugin {
+         return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value, getContext().getResources().getDisplayMetrics());
+     }
+ 
++    /** 상태바·내비게이션바·화면 홈에 머리줄이 겹치지 않게, 키보드가 입력칸을 가리지 않게 (안드로이드 15+ 는 창이 화면 끝까지 그려짐) */
++    private static void fitSystemBars(View root) {
++        root.setOnApplyWindowInsetsListener((v, insets) -> {
++            int l, t, r, b;
++            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
++                android.graphics.Insets in = insets.getInsets(
++                    android.view.WindowInsets.Type.systemBars()
++                        | android.view.WindowInsets.Type.displayCutout()
++                        | android.view.WindowInsets.Type.ime());
++                l = in.left; t = in.top; r = in.right; b = in.bottom;
++            } else {
++                l = insets.getSystemWindowInsetLeft(); t = insets.getSystemWindowInsetTop();
++                r = insets.getSystemWindowInsetRight(); b = insets.getSystemWindowInsetBottom();
++            }
++            v.setPadding(l, t, r, b);
++            return android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R
++                ? android.view.WindowInsets.CONSUMED
++                : insets.consumeSystemWindowInsets();
++        });
++    }
++
+     @PluginMethod
+     public void login(final PluginCall call) {
+         main.post(() -> {
+@@ -236,6 +262,7 @@ public class EntryAccountPlugin extends Plugin {
+             LinearLayout root = new LinearLayout(getContext());
+             root.setOrientation(LinearLayout.VERTICAL);
+             root.setBackgroundColor(Color.WHITE);
++            fitSystemBars(root);
+ 
+             LinearLayout bar = new LinearLayout(getContext());
+             bar.setOrientation(LinearLayout.HORIZONTAL);
+@@ -290,6 +317,29 @@ public class EntryAccountPlugin extends Plugin {
+                 });
+             };
+ 
++            // 덮개 감시: '로그인 확인 중…' 이 12초 넘게 이어지면 첫 화면을 한 번 새로 열어 다시 확인하고,
++            // 그래도 안 되면 덮개를 걷어 화면을 보여 준다 (뒤에서 계속 확인하다가 읽히면 바로 끝남)
++            final Runnable[] coverGuard = new Runnable[1];
++            final Runnable[] pollRef = new Runnable[1];
++            coverGuard[0] = () -> {
++                if (finished[0] || cover.getVisibility() != View.VISIBLE) return;
++                if (!reloadedHome[0]) {
++                    reloadedHome[0] = true;
++                    web.loadUrl(ORIGIN + "/");
++                    main.postDelayed(coverGuard[0], 12000);
++                } else {
++                    cover.setVisibility(View.GONE);
++                    main.removeCallbacks(pollRef[0]);
++                    main.post(pollRef[0]);
++                }
++            };
++            final Runnable showCover = () -> {
++                if (cover.getVisibility() == View.VISIBLE) return;
++                cover.setVisibility(View.VISIBLE);
++                main.removeCallbacks(coverGuard[0]);
++                main.postDelayed(coverGuard[0], 12000);
++            };
++
+             // 사용자 정보를 읽어 보고 있으면 바로 끝낸다 (페이지가 다 열리기 전에도 0.4초마다)
+             final Runnable[] poll = new Runnable[1];
+             final ValueCallback<String> onUser = (value) -> {
+@@ -309,6 +359,7 @@ public class EntryAccountPlugin extends Plugin {
+                 readUser(web, onUser);
+                 main.postDelayed(poll[0], 1200);
+             };
++            pollRef[0] = poll[0];
+ 
+             // 엔트리가 로그인 후 페이지를 새로 열지 않고 화면만 바꾸는 경우(주소만 바뀜) 처리.
+             // 이때 페이지 안의 사용자 정보(__NEXT_DATA__)는 로그인 전 것 그대로라서, 한 번 새로 고쳐서 읽는다.
+@@ -348,7 +399,7 @@ public class EntryAccountPlugin extends Plugin {
+                         veil.setVisibility(View.VISIBLE); // 다시 /signin 으로 돌아올 때도 가린다
+                     }
+                     if (!finished[0] && isAfterLogin(url)) {
+-                        cover.setVisibility(View.VISIBLE);
++                        showCover.run();
+                         main.removeCallbacks(poll[0]);
+                         main.postDelayed(poll[0], 1200);
+                     }
+@@ -359,7 +410,7 @@ public class EntryAccountPlugin extends Plugin {
+                     hideChrome(view, url);
+                     // 로그인 직후 같은 페이지 안에서 엔트리 화면으로 넘어간 경우 → 덮개를 씌우고 로그인 확인
+                     if (finished[0] || !isAfterLogin(url)) return;
+-                    cover.setVisibility(View.VISIBLE);
++                    showCover.run();
+                     main.removeCallbacks(settle);
+                     main.postDelayed(settle, 800);
+                 }
+@@ -429,6 +480,7 @@ public class EntryAccountPlugin extends Plugin {
+                 main.removeCallbacks(poll[0]);
+                 main.removeCallbacks(settle);
+                 main.removeCallbacks(unveil[0]);
++                main.removeCallbacks(coverGuard[0]);
+                 web.stopLoading();
+                 web.destroy();
+                 if (!finished[0]) {
+@@ -1136,6 +1188,7 @@ public class EntryAccountPlugin extends Plugin {
+             LinearLayout root = new LinearLayout(getContext());
+             root.setOrientation(LinearLayout.VERTICAL);
+             root.setBackgroundColor(Color.WHITE);
++            fitSystemBars(root);
+             LinearLayout bar = new LinearLayout(getContext());
+             bar.setOrientation(LinearLayout.HORIZONTAL);
+             bar.setGravity(Gravity.CENTER_VERTICAL);
+diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
+index 899bba59..0d125dc3 100644
+--- a/src/common/buildInfo.ts
++++ b/src/common/buildInfo.ts
+@@ -6,7 +6,7 @@
+  *   - ENTRY_LOCAL_BUILD: 같은 버전 안에서 어떤 패치로 빌드됐는지 구별하는 날짜 번호
+  */
+ export const APP_VERSION = '1.2.0';
+-export const ENTRY_LOCAL_BUILD = '2026.11.07-e'; // 확장 끄기·지우기 바로 적용, importScripts
++export const ENTRY_LOCAL_BUILD = '2026.11.07-f'; // 로그인 확인 멈춤·머리줄 겹침 고침
+ 
+ /** 앱 이름 (안드로이드 / Windows) */
+ export const APP_NAME_ANDROID = 'Entry for Android';
+diff --git a/src/web/entryAccountWeb.ts b/src/web/entryAccountWeb.ts
+index ce767b48..15015164 100644
+--- a/src/web/entryAccountWeb.ts
++++ b/src/web/entryAccountWeb.ts
+@@ -88,7 +88,18 @@ export async function entryLogin(): Promise<EntryUser> {
+     if (!isNative()) {
+         throw new Error(lt('엔트리 로그인은 설치한 앱(안드로이드·Windows)에서만 됩니다.', 'Entry login only works in the installed app (Android · Windows).'));
+     }
+-    const res = await EntryAccount.login();
++    let res: any;
++    try {
++        res = await EntryAccount.login();
++    } catch (e) {
++        // 로그인은 됐는데 확인이 멈춰 [닫기]를 누른 경우: 저장된 세션으로 한 번 더 확인
++        const checked = await EntryAccount.check().catch(() => undefined);
++        const again = normalizeEntryUser(checked && checked.user);
++        if (!again) {
++            throw e;
++        }
++        res = { user: again };
++    }
+     const found = normalizeEntryUser(res && res.user);
+     if (!found) {
+         throw new Error(lt('엔트리 계정 정보를 읽지 못했습니다.', 'Could not read the Entry account information.'));
