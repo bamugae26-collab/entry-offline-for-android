@@ -1,0 +1,736 @@
+diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
+index 1a45a6be..d6f01dc0 100644
+--- a/src/common/buildInfo.ts
++++ b/src/common/buildInfo.ts
+@@ -6,7 +6,7 @@
+  *   - ENTRY_LOCAL_BUILD: 같은 버전 안에서 어떤 패치로 빌드됐는지 구별하는 날짜 번호
+  */
+ export const APP_VERSION = '1.2.0';
+-export const ENTRY_LOCAL_BUILD = '2026.11.07-a'; // 블록 코딩·엔트리파이썬 전환 오류 창 오작동 수정
++export const ENTRY_LOCAL_BUILD = '2026.11.07-b'; // 확장 프로그램(.crx) 올리기
+ 
+ /** 앱 이름 (안드로이드 / Windows) */
+ export const APP_NAME_ANDROID = 'Entry for Android';
+diff --git a/src/renderer/components/header.tsx b/src/renderer/components/header.tsx
+index 7b11cd2d..d36ec2e8 100644
+--- a/src/renderer/components/header.tsx
++++ b/src/renderer/components/header.tsx
+@@ -15,6 +15,7 @@ import styled from 'styled-components';
+ import { lt } from '../../common/localLang';
+ import { getPerformanceSettings } from '../helper/entry/performance';
+ import { openPrintView } from '../helper/printProject';
++import { openExtensionPopup } from '../helper/extensions';
+ import { showLoginAlert } from '../helper/loginAlert';
+ import { showAppInfo } from '../helper/appInfoAlert';
+ import { accountLabel, accountsAvailable, cloudAvailable, cloudReady, getCloudState, subscribeCloud } from '../helper/cloudState';
+@@ -697,6 +698,22 @@ class Header extends Component<IProps, IState> {
+                             </a>
+                             {this.makeDropdown('performance', this.performanceList)}
+                         </div>
++                        {/* [entry-local] 확장 프로그램(.crx) 올리기 — 성능 바로 오른쪽 */}
++                        <div className={'work_space perf_space ext_space'}>
++                            <a
++                                className={'link_workspace_text btn_print_project btn_entry_local_ext'}
++                                title={lt('확장 프로그램', 'Extensions')}
++                                role={'button'}
++                                onClick={() => {
++                                    openExtensionPopup();
++                                }}
++                            >
++                                {/* 퍼즐 조각 (보내 준 원본 그림을 그대로 옮김) — 조각 전체가 동그라미 정가운데 */}
++                                <svg viewBox={'709 67.5 1400 1400'} aria-label={lt('확장 프로그램', 'Extensions')}>
++                                    <path d={'M852 349H1118V247A160 160 0 0 1 1438 247V349H1705A125 125 0 0 1 1830 474V742H1933A158 158 0 0 1 1933 1058H1830V1323A125 125 0 0 1 1705 1448H1458.5V1357A180 180 0 0 0 1098.5 1357V1448H852A125 125 0 0 1 727 1323V1078H820A180 180 0 0 0 820 718H727V474A125 125 0 0 1 852 349Z'} />
++                                </svg>
++                            </a>
++                        </div>
+                     </div>
+ 
+                     {/* [entry-local] 계정(엔트리·구글): 인터넷이 연결되어 있을 때만 */}
+diff --git a/src/renderer/components/workspace.tsx b/src/renderer/components/workspace.tsx
+index 217311b4..54da05d5 100644
+--- a/src/renderer/components/workspace.tsx
++++ b/src/renderer/components/workspace.tsx
+@@ -63,6 +63,7 @@ import { installBackpack } from '../helper/backpack';
+ import { installPaintRoom } from '../helper/paintRoom';
+ import { installInputCaretFix } from '../helper/inputCaretFix';
+ import { installHardwareLite, applyHardwareInitOption } from '../helper/hardwareLite';
++import { startExtensions } from '../helper/extensions';
+ import { installTouchSliders } from '../helper/touchSliders';
+ import { lt, setMainLang, currentLang } from '../../common/localLang';
+ 
+@@ -372,6 +373,8 @@ class Workspace extends Component<IProps> {
+             (type, events, data, imageBaseUrl) => (ModalHelper as any)._switchPopup(type, events, data, imageBaseUrl),
+             (message) => ModalHelper.getAlertModal(message)
+         );
++        // [1.2] 확장 프로그램(.crx): 켜 둔 것을 앱을 켤 때 한 번 실행
++        setTimeout(() => startExtensions(), 0);
+         // 교과형에서 하드웨어가 바뀔때 마다 카테고리 변화
+         addEventListener('hwChanged', this.handleHardwareChange);
+         // 하드웨어 다운로드 탭에서 다운로드 처리
+diff --git a/src/renderer/helper/extensionIcon.ts b/src/renderer/helper/extensionIcon.ts
+new file mode 100644
+index 00000000..85c287fe
+--- /dev/null
++++ b/src/renderer/helper/extensionIcon.ts
+@@ -0,0 +1,2 @@
++/** [entry-local] 아이콘이 없는 확장 프로그램에 쓰는 기본 아이콘 (128×128 PNG) */
++export const DEFAULT_EXTENSION_ICON = 'data:image/png;base64,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';
+diff --git a/src/renderer/helper/extensions.ts b/src/renderer/helper/extensions.ts
+new file mode 100644
+index 00000000..3de513ff
+--- /dev/null
++++ b/src/renderer/helper/extensions.ts
+@@ -0,0 +1,653 @@
++import { lt } from '../../common/localLang';
++import { DEFAULT_EXTENSION_ICON } from './extensionIcon';
++
++/**
++ * [entry-local 1.2] 확장 프로그램 — 크롬 웹 스토어의 '엔트리용 확장 프로그램'(.crx)을 앱에서 쓰기
++ *
++ * 엔트리용 확장 프로그램은 대부분 playentry.org 화면에 스크립트(content_scripts)를 넣어
++ * window.Entry 를 고치는 방식이다. 이 앱도 같은 Entry 를 쓰므로 그 스크립트를 그대로 넣으면 된다.
++ *  - .crx(크롬 확장 파일) = 머리말 + zip → manifest.json 의 content_scripts 중 playentry.org 에 붙는 것만 쓴다
++ *  - world: "MAIN" 스크립트는 그대로, 기본(ISOLATED) 스크립트는 작은 chrome.* 대신(runtime.getURL·storage.local·i18n)과 함께 넣는다
++ *  - 추가한 확장은 이 기기(IndexedDB)에 저장되어 앱을 켤 때마다 자동으로 켜진다
++ *  - 끄거나 지운 확장은 이미 들어간 스크립트를 되돌릴 수 없으므로 앱을 다시 시작해야 완전히 빠진다
++ * 백그라운드 페이지·팝업·크롬 전용 기능(탭·알림 등)은 없으므로 그런 기능만 쓰는 확장은 동작하지 않는다.
++ */
++
++type ContentScript = { world: 'MAIN' | 'ISOLATED'; js: string[]; css: string[] };
++
++export type ExtensionRecord = {
++    id: string;
++    name: string;
++    version: string;
++    description: string;
++    icon: string;
++    enabled: boolean;
++    addedAt: number;
++    scripts: ContentScript[];
++    /** 확장 안의 파일 (경로 → 내용) — 스크립트·스타일과 chrome.runtime.getURL 로 쓰는 그림 등 */
++    files: Record<string, ArrayBuffer>;
++    messages: Record<string, string>;
++};
++
++const MAX_SIZE = 30 * 1024 * 1024;
++const ENTRY_PAGES = ['https://playentry.org/ws/new', 'https://playentry.org/ws/', 'https://playentry.org/project/', 'https://playentry.org/'];
++
++// ── .crx 읽기 ────────────────────────────────────────────────────────────────────
++
++class ExtensionError extends Error {}
++
++/** zip 의 deflate 묶음 풀기 — gzip 모양으로 감싸 브라우저의 DecompressionStream('gzip')으로 (크롬 80+, 안드로이드 웹뷰·Windows 둘 다) */
++async function inflateRaw(data: Uint8Array, crc: number, size: number) {
++    const DS = (window as any).DecompressionStream;
++    if (!DS) {
++        throw new ExtensionError(lt('이 기기에서는 압축을 풀 수 없습니다.', 'This device cannot unpack the file.'));
++    }
++    const gz = new Uint8Array(10 + data.length + 8);
++    gz.set([0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff]);
++    gz.set(data, 10);
++    const view = new DataView(gz.buffer);
++    view.setUint32(10 + data.length, crc >>> 0, true);
++    view.setUint32(14 + data.length, size >>> 0, true);
++    const stream = new Blob([gz]).stream().pipeThrough(new DS('gzip'));
++    return new Uint8Array(await new Response(stream).arrayBuffer());
++}
++
++async function unzip(buf: Uint8Array) {
++    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
++    let eocd = -1;
++    for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
++        if (view.getUint32(i, true) === 0x06054b50) {
++            eocd = i;
++            break;
++        }
++    }
++    if (eocd < 0) {
++        throw new ExtensionError(lt('확장 프로그램 파일이 손상되었습니다.', 'The extension file is damaged.'));
++    }
++    const count = view.getUint16(eocd + 10, true);
++    let p = view.getUint32(eocd + 16, true);
++    const decoder = new TextDecoder();
++    const files = new Map<string, Uint8Array>();
++    for (let n = 0; n < count; n++) {
++        if (view.getUint32(p, true) !== 0x02014b50) {
++            throw new ExtensionError(lt('확장 프로그램 파일이 손상되었습니다.', 'The extension file is damaged.'));
++        }
++        const method = view.getUint16(p + 10, true);
++        const crc = view.getUint32(p + 16, true);
++        const compSize = view.getUint32(p + 20, true);
++        const size = view.getUint32(p + 24, true);
++        const nameLen = view.getUint16(p + 28, true);
++        const extraLen = view.getUint16(p + 30, true);
++        const commentLen = view.getUint16(p + 32, true);
++        const local = view.getUint32(p + 42, true);
++        const name = decoder.decode(buf.subarray(p + 46, p + 46 + nameLen)).replace(/\\/g, '/');
++        p += 46 + nameLen + extraLen + commentLen;
++        if (name.endsWith('/')) {
++            continue;
++        }
++        const start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
++        const raw = buf.subarray(start, start + compSize);
++        if (method === 0) {
++            files.set(name, raw.slice());
++        } else if (method === 8) {
++            files.set(name, await inflateRaw(raw, crc, size));
++        }
++    }
++    return files;
++}
++
++/** .crx = 'Cr24' + 판(2·3) + 서명 머리말 + zip */
++function zipFromCrx(buf: Uint8Array) {
++    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
++    if (buf.length < 16 || view.getUint32(0, false) !== 0x43723234) {
++        throw new ExtensionError(lt('crx 형식의 확장 프로그램 파일이 아닙니다.', 'This is not a .crx extension file.'));
++    }
++    const version = view.getUint32(4, true);
++    const start = version === 2 ? 16 + view.getUint32(8, true) + view.getUint32(12, true) : 12 + view.getUint32(8, true);
++    return buf.subarray(start);
++}
++
++function globToRegExp(glob: string) {
++    return new RegExp(`^${glob.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
++}
++
++/** 확장의 matches 가 엔트리 만들기 화면(playentry.org)에 붙는가 */
++function matchesEntry(pattern: string) {
++    if (pattern === '<all_urls>') {
++        return true;
++    }
++    const m = /^(\*|https?):\/\/([^/]+)(\/.*)$/.exec(pattern);
++    if (!m) {
++        return false;
++    }
++    const host = m[2];
++    if (!(host === '*' || host === 'playentry.org' || host === '*.playentry.org')) {
++        return false;
++    }
++    const path = globToRegExp(m[3]);
++    return ENTRY_PAGES.some((url) => path.test(url.replace(/^https:\/\/playentry\.org/, '')));
++}
++
++function toBuffer(data: Uint8Array) {
++    return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
++}
++
++function mimeOf(path: string) {
++    const ext = path.split('.').pop()!.toLowerCase();
++    return (
++        ({
++            png: 'image/png',
++            jpg: 'image/jpeg',
++            jpeg: 'image/jpeg',
++            gif: 'image/gif',
++            svg: 'image/svg+xml',
++            webp: 'image/webp',
++            js: 'text/javascript',
++            css: 'text/css',
++            json: 'application/json',
++            html: 'text/html',
++            mp3: 'audio/mpeg',
++            wav: 'audio/wav',
++            ogg: 'audio/ogg',
++            woff: 'font/woff',
++            woff2: 'font/woff2',
++            ttf: 'font/ttf',
++        } as Record<string, string>)[ext] || 'application/octet-stream'
++    );
++}
++
++async function toDataUrl(data: Uint8Array, mime: string) {
++    return new Promise<string>((resolve) => {
++        const r = new FileReader();
++        r.onload = () => resolve(String(r.result));
++        r.onerror = () => resolve('');
++        r.readAsDataURL(new Blob([data], { type: mime }));
++    });
++}
++
++/** 확장 프로그램 파일 → 기록 (엔트리에 붙는 스크립트가 없으면 거절) */
++export async function readExtensionFile(file: File): Promise<ExtensionRecord> {
++    if (file.size > MAX_SIZE) {
++        throw new ExtensionError(lt('파일이 너무 큽니다 (30MB 이하).', 'The file is too large (30 MB max).'));
++    }
++    const files = await unzip(zipFromCrx(new Uint8Array(await file.arrayBuffer())));
++    const text = (path: string) => new TextDecoder().decode(files.get(path)!).replace(/^﻿/, '');
++    if (!files.has('manifest.json')) {
++        throw new ExtensionError(lt('확장 프로그램 정보(manifest.json)가 없습니다.', 'manifest.json is missing.'));
++    }
++    let manifest: any;
++    try {
++        manifest = JSON.parse(text('manifest.json'));
++    } catch (e) {
++        throw new ExtensionError(lt('확장 프로그램 정보(manifest.json)를 읽을 수 없습니다.', 'manifest.json cannot be read.'));
++    }
++    // 다국어 이름 (__MSG_이름__) — 한국어 → 기본 언어 → 영어
++    const messages: Record<string, string> = {};
++    const locales = [manifest.default_locale, 'en', lt('ko', 'en')].filter(Boolean);
++    locales.forEach((loc: string) => {
++        const path = `_locales/${loc}/messages.json`;
++        if (files.has(path)) {
++            try {
++                const json = JSON.parse(text(path));
++                Object.keys(json).forEach((k) => (messages[k.toLowerCase()] = json[k] && json[k].message));
++            } catch (e) {
++                // 무시
++            }
++        }
++    });
++    const msg = (s: any) => String(s || '').replace(/__MSG_(\w+)__/g, (all, key) => messages[key.toLowerCase()] ?? all);
++
++    const scripts: ContentScript[] = [];
++    (manifest.content_scripts || []).forEach((cs: any) => {
++        if (!(cs.matches || []).some(matchesEntry)) {
++            return;
++        }
++        const js = (cs.js || []).map((p: string) => p.replace(/^\//, '')).filter((p: string) => files.has(p));
++        const css = (cs.css || []).map((p: string) => p.replace(/^\//, '')).filter((p: string) => files.has(p));
++        if (js.length || css.length) {
++            scripts.push({ world: cs.world === 'MAIN' ? 'MAIN' : 'ISOLATED', js, css });
++        }
++    });
++    if (!scripts.length) {
++        throw new ExtensionError(
++            lt(
++                `'${msg(manifest.name) || file.name}'은(는) 엔트리에서 호환되지 않는 확장 프로그램입니다.\n(엔트리 화면에 붙는 기능이 없습니다)`,
++                `'${msg(manifest.name) || file.name}' is not compatible with Entry.\n(It has nothing that runs on the Entry editor.)`
++            )
++        );
++    }
++
++    // 아이콘: 128 → 가장 큰 것
++    let icon = '';
++    const icons = manifest.icons || {};
++    const iconPath = Object.keys(icons)
++        .sort((a, b) => Math.abs(128 - Number(a)) - Math.abs(128 - Number(b)))
++        .map((k) => String(icons[k]).replace(/^\//, ''))
++        .find((p) => files.has(p));
++    if (iconPath) {
++        icon = await toDataUrl(files.get(iconPath)!, mimeOf(iconPath));
++    }
++
++    const kept: Record<string, ArrayBuffer> = {};
++    files.forEach((data, path) => {
++        if (!path.startsWith('_metadata/')) {
++            kept[path] = toBuffer(data);
++        }
++    });
++    const name = msg(manifest.name) || file.name.replace(/\.crx$/i, '');
++    return {
++        id: `ext:${name}`,
++        name,
++        version: String(manifest.version || ''),
++        description: msg(manifest.description),
++        icon,
++        enabled: true,
++        addedAt: Date.now(),
++        scripts,
++        files: kept,
++        messages,
++    };
++}
++
++// ── 저장 (이 기기) ────────────────────────────────────────────────────────
++
++const DB_NAME = 'entry-local-extensions';
++const STORE = 'extensions';
++
++function openDb(): Promise<IDBDatabase> {
++    return new Promise((resolve, reject) => {
++        const req = indexedDB.open(DB_NAME, 1);
++        req.onupgradeneeded = () => req.result.createObjectStore(STORE, { keyPath: 'id' });
++        req.onsuccess = () => resolve(req.result);
++        req.onerror = () => reject(req.error);
++    });
++}
++
++async function tx<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T> | void): Promise<T | undefined> {
++    const db = await openDb();
++    return new Promise((resolve, reject) => {
++        const t = db.transaction(STORE, mode);
++        const req = fn(t.objectStore(STORE));
++        t.oncomplete = () => {
++            db.close();
++            resolve(req ? req.result : undefined);
++        };
++        t.onerror = () => {
++            db.close();
++            reject(t.error);
++        };
++    });
++}
++
++export async function listExtensions(): Promise<ExtensionRecord[]> {
++    try {
++        const all = ((await tx('readonly', (s) => s.getAll())) || []) as ExtensionRecord[];
++        return all.sort((a, b) => a.addedAt - b.addedAt);
++    } catch (e) {
++        console.warn('extensions: list failed', e);
++        return [];
++    }
++}
++
++async function saveExtension(ext: ExtensionRecord) {
++    await tx('readwrite', (s) => s.put(ext));
++}
++
++async function removeExtension(id: string) {
++    await tx('readwrite', (s) => s.delete(id));
++}
++
++// ── 실행 ─────────────────────────────────────────────────────────────────
++
++const running = new Map<string, string>(); // id → 켠 판(version)
++const api: Record<string, any> = ((window as any).__entryLocalExtensions = (window as any).__entryLocalExtensions || {});
++
++function fileText(ext: ExtensionRecord, path: string) {
++    return new TextDecoder().decode(new Uint8Array(ext.files[path])).replace(/^﻿/, '');
++}
++
++/** 확장 안 파일 주소 (chrome.runtime.getURL) — 필요할 때 blob 주소를 만든다 */
++function urlMaker(ext: ExtensionRecord) {
++    const urls: Record<string, string> = {};
++    return (path: string) => {
++        const p = String(path || '').replace(/^\//, '');
++        if (!ext.files[p]) {
++            return p;
++        }
++        if (!urls[p]) {
++            urls[p] = URL.createObjectURL(new Blob([ext.files[p]], { type: mimeOf(p) }));
++        }
++        return urls[p];
++    };
++}
++
++/** 기본(ISOLATED) 스크립트가 쓰는 chrome.* 중 화면에서 흉내 낼 수 있는 것만 */
++function chromeShim(ext: ExtensionRecord, getURL: (p: string) => string) {
++    const key = `entry-local-ext:${ext.id}`;
++    const read = (): Record<string, any> => {
++        try {
++            return JSON.parse(localStorage.getItem(key) || '{}');
++        } catch (e) {
++            return {};
++        }
++    };
++    const write = (data: Record<string, any>) => {
++        try {
++            localStorage.setItem(key, JSON.stringify(data));
++        } catch (e) {
++            // 저장 못 함
++        }
++    };
++    const done = <T>(value: T, cb?: (v: T) => void) => {
++        cb && setTimeout(() => cb(value));
++        return Promise.resolve(value);
++    };
++    const pick = (keys: any) => {
++        const all = read();
++        if (keys == null) {
++            return all;
++        }
++        if (typeof keys === 'string') {
++            return keys in all ? { [keys]: all[keys] } : {};
++        }
++        if (Array.isArray(keys)) {
++            return keys.reduce((o: any, k: string) => (k in all && (o[k] = all[k]), o), {});
++        }
++        return Object.keys(keys).reduce((o: any, k) => ((o[k] = k in all ? all[k] : keys[k]), o), {});
++    };
++    const listeners = new Set<Function>();
++    const storageArea = {
++        get: (keys?: any, cb?: any) => (typeof keys === 'function' ? done(pick(null), keys) : done(pick(keys), cb)),
++        set: (items: any, cb?: any) => {
++            write({ ...read(), ...items });
++            return done(undefined, cb);
++        },
++        remove: (keys: any, cb?: any) => {
++            const all = read();
++            [].concat(keys).forEach((k: string) => delete all[k]);
++            write(all);
++            return done(undefined, cb);
++        },
++        clear: (cb?: any) => {
++            write({});
++            return done(undefined, cb);
++        },
++    };
++    const event = () => ({ addListener: (f: Function) => listeners.add(f), removeListener: (f: Function) => listeners.delete(f), hasListener: (f: Function) => listeners.has(f) });
++    return {
++        runtime: {
++            id: ext.id,
++            getURL,
++            getManifest: () => ({ name: ext.name, version: ext.version, description: ext.description }),
++            sendMessage: (...args: any[]) => done(undefined, typeof args[args.length - 1] === 'function' ? args[args.length - 1] : undefined),
++            onMessage: event(),
++            onInstalled: event(),
++            lastError: undefined,
++        },
++        storage: { local: storageArea, sync: storageArea, onChanged: event() },
++        i18n: {
++            getMessage: (name: string) => ext.messages[String(name).toLowerCase()] || '',
++            getUILanguage: () => lt('ko', 'en'),
++        },
++        extension: { getURL },
++    };
++}
++
++function addScript(code: string) {
++    const s = document.createElement('script');
++    s.textContent = code;
++    (document.head || document.documentElement).appendChild(s);
++    s.remove();
++}
++
++function runExtension(ext: ExtensionRecord) {
++    if (running.has(ext.id)) {
++        return;
++    }
++    running.set(ext.id, ext.version);
++    const getURL = urlMaker(ext);
++    api[ext.id] = chromeShim(ext, getURL);
++    const ref = `window.__entryLocalExtensions[${JSON.stringify(ext.id)}]`;
++    ext.scripts.forEach((cs, i) => {
++        cs.css.forEach((path) => {
++            const style = document.createElement('style');
++            style.setAttribute('data-entry-extension', ext.name);
++            style.textContent = fileText(ext, path).replace(/chrome-extension:\/\/__MSG_@@extension_id__\/([^)"']+)/g, (all, p) => getURL(p));
++            document.head.appendChild(style);
++        });
++        if (!cs.js.length) {
++            return;
++        }
++        try {
++            if (cs.world === 'MAIN') {
++                cs.js.forEach((path) => addScript(`${fileText(ext, path)}\n//# sourceURL=entry-extension/${encodeURIComponent(ext.name)}/${path}`));
++            } else {
++                // 같은 묶음의 파일은 한 범위에서 차례로 (크롬의 ISOLATED 세계처럼 서로의 전역 이름을 본다)
++                const body = cs.js.map((path) => fileText(ext, path)).join('\n;\n');
++                addScript(`(function (chrome, browser) {\n${body}\n}).call(window, ${ref}, ${ref});\n//# sourceURL=entry-extension/${encodeURIComponent(ext.name)}/content-${i}.js`);
++            }
++        } catch (e) {
++            console.warn(`extension ${ext.name} failed`, e);
++        }
++    });
++}
++
++let started = false;
++
++/** 앱을 켤 때 (엔트리가 준비된 뒤) 한 번: 켜 둔 확장 실행 */
++export async function startExtensions() {
++    if (started) {
++        return;
++    }
++    started = true;
++    (await listExtensions()).filter((e) => e.enabled).forEach(runExtension);
++}
++
++// ── '확장 프로그램 올리기' 창 ───────────────────────────────────────────────
++// 엔트리의 [오브젝트 추가하기 → 파일 올리기] 창과 같은 모양 (엔트리 창 스타일을 그대로 쓴다)
++
++const ROOT_ID = 'entry-local-extensions';
++const CSS = `
++#${ROOT_ID} { position: fixed; inset: 0; z-index: 8990; font-family: inherit; }
++#${ROOT_ID} .popup_wrap__db983 { min-width: 0; }
++#${ROOT_ID} .ele-body { flex: 1; overflow-y: auto; padding: 24px 0; -webkit-overflow-scrolling: touch; }
++#${ROOT_ID} .file_add_list_content__db983 { min-height: 0; overflow: visible; padding: 0 16px; }
++#${ROOT_ID} .ele-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
++#${ROOT_ID} .obj_list__db983 li { position: relative; }
++#${ROOT_ID} .ele-circle { display: inline-flex; align-items: center; justify-content: center; width: 64px; height: 64px; margin-top: 22px;
++  border-radius: 50%; background: #f5f5f5; vertical-align: top; }
++#${ROOT_ID} .ele-circle img { width: 40px; height: 40px; max-width: none; margin: 0; object-fit: contain; }
++#${ROOT_ID} .ele-ver { position: absolute; left: 0; right: 0; top: 92px; font-size: 11px; color: #9aa4ab; text-align: center; }
++#${ROOT_ID} .ele-del { position: absolute; top: 4px; right: 4px; z-index: 20; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 13px;
++  background: rgba(44, 49, 61, .55); color: #fff; font-size: 17px; line-height: 26px; cursor: pointer; }
++#${ROOT_ID} .ele-new { position: absolute; top: 6px; left: 6px; z-index: 20; padding: 1px 6px; border-radius: 9px; background: #4f80ff;
++  color: #fff; font-size: 11px; font-weight: 600; }
++`;
++
++export function closeExtensionPopup() {
++    const root = document.getElementById(ROOT_ID);
++    root && root.remove();
++}
++
++function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string) {
++    const e = document.createElement(tag);
++    cls && (e.className = cls);
++    text != null && (e.textContent = text);
++    return e;
++}
++
++function toast(title: string, message: string, alert = false) {
++    const Entry = (window as any).Entry;
++    if (Entry && Entry.toast) {
++        alert ? Entry.toast.alert(title, message) : Entry.toast.success(title, message);
++    }
++}
++
++type Tile = { ext: ExtensionRecord; selected: boolean; isNew: boolean; removed: boolean };
++
++/** 헤더의 [확장 프로그램] 버튼 */
++export async function openExtensionPopup() {
++    closeExtensionPopup();
++    if (!document.getElementById(`${ROOT_ID}-style`)) {
++        const style = document.createElement('style');
++        style.id = `${ROOT_ID}-style`;
++        style.textContent = CSS;
++        document.head.appendChild(style);
++    }
++    const title = lt('확장 프로그램 올리기', 'Upload extensions');
++    const tiles: Tile[] = (await listExtensions()).map((ext) => ({ ext, selected: ext.enabled, isNew: false, removed: false }));
++
++    const root = el('div');
++    root.id = ROOT_ID;
++    const wrap = el('div', 'popup_wrap__db983');
++    const header = el('header', 'pop_header__db983');
++    header.appendChild(el('h1', '', title));
++    const back = el('button', 'btn_back__db983 imbtn_pop_close__db983');
++    back.appendChild(el('span', 'blind__db983', lt('닫기', 'Close')));
++    back.onclick = closeExtensionPopup;
++    header.appendChild(back);
++    const right = el('div');
++    const add = el('a', 'btn__db983', lt('추가하기', 'Add'));
++    add.setAttribute('role', 'button');
++    right.appendChild(add);
++    header.appendChild(right);
++    wrap.appendChild(header);
++
++    const body = el('div', 'ele-body');
++    const content = el('div', 'section_content__db983 file_add_list_content__db983');
++    const area = el('div', 'list_area__db983');
++    const box = el('div', 'file_add_box__db983');
++    const input = el('input', 'ele-input') as HTMLInputElement;
++    input.type = 'file';
++    input.multiple = true;
++    input.id = `${ROOT_ID}-file`;
++    const upload = el('label', 'upload__db983 imbtn_pop_upload__db983', lt('파일 올리기', 'Upload file'));
++    upload.setAttribute('for', input.id);
++    box.appendChild(upload);
++    box.appendChild(input);
++    area.appendChild(box);
++    const list = el('ul', 'obj_list__db983');
++    area.appendChild(list);
++    content.appendChild(area);
++    const caution = el('div', 'caution_box__db983');
++    caution.appendChild(el('p', 'caution__db983', lt('crx 형식이면서 엔트리에서 호환되는 플러그인만 업로드 할 수 있습니다.', 'Only .crx plugins compatible with Entry can be uploaded.')));
++    content.appendChild(caution);
++    body.appendChild(content);
++    wrap.appendChild(body);
++    root.appendChild(wrap);
++
++    const render = () => {
++        list.textContent = '';
++        tiles
++            .filter((t) => !t.removed)
++            .forEach((t) => {
++                const li = el('li', t.selected ? 'on__db983' : '');
++                li.title = [t.ext.name, t.ext.version && `v${t.ext.version}`, t.ext.description].filter(Boolean).join('\n');
++                const link = el('div', 'link__db983');
++                const thumb = el('div', 'thmb__db983');
++                const circle = el('span', 'ele-circle');
++                const img = el('img') as HTMLImageElement;
++                img.src = t.ext.icon || DEFAULT_EXTENSION_ICON;
++                img.alt = '';
++                img.onerror = () => (img.src = DEFAULT_EXTENSION_ICON);
++                circle.appendChild(img);
++                thumb.appendChild(circle);
++                link.appendChild(thumb);
++                t.ext.version && link.appendChild(el('span', 'ele-ver', `v${t.ext.version}`));
++                link.appendChild(el('em', 'sjt__db983', t.ext.name));
++                link.onclick = () => {
++                    t.selected = !t.selected;
++                    render();
++                };
++                li.appendChild(link);
++                t.isNew && li.appendChild(el('span', 'ele-new', lt('새로', 'New')));
++                const del = el('button', 'ele-del', '×');
++                del.title = lt('지우기', 'Remove');
++                del.onclick = (e) => {
++                    e.stopPropagation();
++                    t.removed = true;
++                    render();
++                };
++                li.appendChild(del);
++                list.appendChild(li);
++            });
++    };
++
++    input.onchange = async () => {
++        const picked = Array.from(input.files || []);
++        input.value = '';
++        for (const file of picked) {
++            try {
++                if (!/\.crx$/i.test(file.name)) {
++                    throw new ExtensionError(lt(`'${file.name}'은(는) crx 형식이 아닙니다.`, `'${file.name}' is not a .crx file.`));
++                }
++                const ext = await readExtensionFile(file);
++                const same = tiles.find((t) => t.ext.id === ext.id);
++                if (same) {
++                    // 같은 확장을 다시 올림 → 새 파일로 바꾼다
++                    same.ext = { ...ext, addedAt: same.ext.addedAt };
++                    same.selected = true;
++                    same.removed = false;
++                    same.isNew = true;
++                } else {
++                    tiles.push({ ext, selected: true, isNew: true, removed: false });
++                }
++            } catch (e) {
++                const message = e instanceof ExtensionError ? e.message : lt(`'${file.name}'을(를) 읽지 못했습니다.`, `Could not read '${file.name}'.`);
++                if (!(e instanceof ExtensionError)) {
++                    console.warn('extension read failed', e);
++                }
++                toast(title, message, true);
++            }
++        }
++        render();
++    };
++
++    add.onclick = async () => {
++        let restart = false;
++        const started: string[] = [];
++        try {
++            for (const t of tiles) {
++                const wasRunning = running.has(t.ext.id);
++                if (t.removed) {
++                    if (!t.isNew) {
++                        await removeExtension(t.ext.id);
++                    }
++                    restart = restart || wasRunning;
++                    continue;
++                }
++                const ext = { ...t.ext, enabled: t.selected };
++                if (t.isNew || ext.enabled !== t.ext.enabled) {
++                    await saveExtension(ext);
++                }
++                if (ext.enabled) {
++                    if (wasRunning && running.get(ext.id) !== ext.version) {
++                        restart = true; // 이미 다른 판이 돌고 있음
++                    } else if (!wasRunning) {
++                        runExtension(ext);
++                        started.push(ext.name);
++                    }
++                } else if (wasRunning) {
++                    restart = true;
++                }
++            }
++        } catch (e) {
++            console.warn('extension save failed', e);
++            toast(title, lt('확장 프로그램을 저장하지 못했습니다.', 'Could not save the extensions.'), true);
++            return;
++        }
++        closeExtensionPopup();
++        if (started.length) {
++            toast(lt('확장 프로그램', 'Extensions'), lt(`${started.join(', ')} 켜짐`, `${started.join(', ')} turned on`));
++        }
++        if (restart) {
++            toast(
++                lt('확장 프로그램', 'Extensions'),
++                lt('끄거나 지운·바꾼 확장 프로그램은 앱을 다시 시작하면 적용됩니다.', 'Restart the app to finish turning off, removing or updating extensions.')
++            );
++        }
++    };
++
++    render();
++    document.body.appendChild(root);
++}
