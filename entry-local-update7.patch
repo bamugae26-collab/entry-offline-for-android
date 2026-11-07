@@ -1,0 +1,279 @@
+diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
+index c4d1c66d..899bba59 100644
+--- a/src/common/buildInfo.ts
++++ b/src/common/buildInfo.ts
+@@ -6,7 +6,7 @@
+  *   - ENTRY_LOCAL_BUILD: 같은 버전 안에서 어떤 패치로 빌드됐는지 구별하는 날짜 번호
+  */
+ export const APP_VERSION = '1.2.0';
+-export const ENTRY_LOCAL_BUILD = '2026.11.07-d'; // 앞 판에서 추가한 확장도 팝업·백그라운드 켜기
++export const ENTRY_LOCAL_BUILD = '2026.11.07-e'; // 확장 끄기·지우기 바로 적용, importScripts
+ 
+ /** 앱 이름 (안드로이드 / Windows) */
+ export const APP_NAME_ANDROID = 'Entry for Android';
+diff --git a/src/renderer/components/workspace.tsx b/src/renderer/components/workspace.tsx
+index d04b8c30..914b9a22 100644
+--- a/src/renderer/components/workspace.tsx
++++ b/src/renderer/components/workspace.tsx
+@@ -63,7 +63,7 @@ import { installBackpack } from '../helper/backpack';
+ import { installPaintRoom } from '../helper/paintRoom';
+ import { installInputCaretFix } from '../helper/inputCaretFix';
+ import { installHardwareLite, applyHardwareInitOption } from '../helper/hardwareLite';
+-import { startExtensions } from '../helper/extensionHost';
++import { startExtensions, setExtensionReloader } from '../helper/extensionHost';
+ import { installTouchSliders } from '../helper/touchSliders';
+ import { lt, setMainLang, currentLang } from '../../common/localLang';
+ 
+@@ -374,6 +374,14 @@ class Workspace extends Component<IProps> {
+             (message) => ModalHelper.getAlertModal(message)
+         );
+         // [1.2] 확장 프로그램(.crx): 켜 둔 것을 앱을 켤 때 한 번 실행
++        //  끄거나 지운 확장은 이미 들어간 코드를 빼야 하므로, 부스트 모드처럼 지금 작품을 임시 보관하고 화면을 다시 불러온다
++        setExtensionReloader(() => {
++            if (Entry.engine && !Entry.engine.isState('stop')) {
++                Entry.engine.toggleStop();
++            }
++            LocalStorageManager.saveTempProject(this.exportCurrentProject());
++            location.reload();
++        });
+         setTimeout(() => startExtensions(), 0);
+         // 교과형에서 하드웨어가 바뀔때 마다 카테고리 변화
+         addEventListener('hwChanged', this.handleHardwareChange);
+@@ -1328,6 +1336,19 @@ class Workspace extends Component<IProps> {
+     };
+ 
+     // [entry-local] 성능 설정 변경
++    /** 지금 작품 + 저장 위치 정보 (다시 불러온 뒤 그대로 이어서 쓰도록) */
++    exportCurrentProject = () => {
++        const project = Entry.exportProject();
++        project.name = this._getProjectName();
++        project.localProjectId = this.localProjectId;
++        project.cloudFileId = this.cloudFileId;
++        project.entryProjectId = this.entryProjectId;
++        project.saveTarget = this.saveTarget;
++        project.parent = this.projectParent;
++        project.savedPath = this.projectSavedPath;
++        return project;
++    };
++
+     handlePerformanceChange = (key: 'boost' | 'turbo' | 'fastEngine') => {
+         const settings = getPerformanceSettings();
+         if (key === 'turbo') {
+@@ -1338,14 +1359,7 @@ class Workspace extends Component<IProps> {
+         if (Entry.engine && !Entry.engine.isState('stop')) {
+             Entry.engine.toggleStop();
+         }
+-        const project = Entry.exportProject();
+-        project.name = this._getProjectName();
+-        project.localProjectId = this.localProjectId;
+-        project.cloudFileId = this.cloudFileId;
+-        project.entryProjectId = this.entryProjectId;
+-        project.saveTarget = this.saveTarget;
+-        project.parent = this.projectParent;
+-        project.savedPath = this.projectSavedPath;
++        const project = this.exportCurrentProject();
+         if (key === 'fastEngine') {
+             setFastEngine(!settings.fastEngine, project);
+         } else {
+diff --git a/src/renderer/helper/extensionHost.ts b/src/renderer/helper/extensionHost.ts
+index f78a5bb1..27ec3738 100644
+--- a/src/renderer/helper/extensionHost.ts
++++ b/src/renderer/helper/extensionHost.ts
+@@ -11,7 +11,7 @@ import { DEFAULT_EXTENSION_ICON } from './extensionIcon';
+  *  - 백그라운드(서비스 워커)도 같은 화면 안에서 돌리고, 팝업 창(확장 아이콘 창)은 톱니바퀴 메뉴 안에 보여 준다
+  *  - 확장 스크립트에게는 주소(location)가 엔트리 만들기 화면(playentry.org/ws/new)으로 보인다
+  *  - 추가한 확장은 이 기기(IndexedDB)에 저장되어 앱을 켤 때마다 자동으로 켜진다
+- *  - 끄거나 지운 확장은 이미 들어간 스크립트를 되돌릴 수 없으므로 앱을 다시 시작해야 완전히 빠진다
++ *  - 이미 돌고 있던 확장을 끄거나 지우면, 지금 작품을 임시 보관하고 화면을 다시 불러와 완전히 뺀다 (작품은 그대로 다시 열림)
+  * 크롬에만 있는 기능(새 탭·알림·다운로드 등)은 없으므로 그런 기능에 기대는 확장은 일부만 동작할 수 있다.
+  */
+ 
+@@ -373,6 +373,8 @@ type Bus = {
+     rawURL: (p: string) => string;
+     message: Record<Ctx, Set<Listener>>;
+     storage: Set<Listener>;
++    /** 끄거나 지움 → 톱니바퀴 메뉴의 팝업을 숨긴다 (이미 들어간 스크립트는 다시 시작해야 빠짐) */
++    hidden?: boolean;
+ };
+ 
+ const running = new Map<string, string>(); // id → 켠 판(version)
+@@ -392,9 +394,11 @@ const LOC = '__entryLocalPlayentryLocation';
+         toString: () => u.href,
+         ancestorOrigins: real().ancestorOrigins,
+     };
+-    ['href', 'origin', 'protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash'].forEach((k) =>
++    ['href', 'protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash'].forEach((k) =>
+         Object.defineProperty(loc, k, { get: () => (u as any)[k], set: () => undefined, enumerable: true })
+     );
++    // origin 은 진짜 값: postMessage 의 event.origin 과 location.origin 을 비교하는 확장(엔트리 디버깅 툴 등)이 있다
++    Object.defineProperty(loc, 'origin', { get: () => real().origin, enumerable: true });
+     return loc;
+ })();
+ const TAB = { id: 1, windowId: 1, index: 0, active: true, highlighted: true, selected: true, pinned: false, incognito: false, status: 'complete', url: ENTRY_URL, title: '엔트리' };
+@@ -408,9 +412,9 @@ function wrapMain(code: string, name: string) {
+     return `{ const location = window.${LOC};\n${code}\n}\n//# sourceURL=entry-extension/${name}`;
+ }
+ 
+-/** chrome.* 를 쓰는 코드(content·백그라운드): 확장 전용 chrome 을 넘겨 준다 */
++/** chrome.* 를 쓰는 코드(content·백그라운드): 확장 전용 chrome 을 넘겨 준다 (백그라운드는 importScripts 도) */
+ function wrapWithApi(code: string, ref: string, name: string) {
+-    return `(function (chrome, browser) { const location = window.${LOC};\n${code}\n}).call(window, ${ref}, ${ref});\n//# sourceURL=entry-extension/${name}`;
++    return `(function (chrome, browser, importScripts) { const location = window.${LOC};\n${code}\n}).call(window, ${ref}, ${ref}, ${ref}.__importScripts);\n//# sourceURL=entry-extension/${name}`;
+ }
+ 
+ function addScript(code: string) {
+@@ -510,10 +514,6 @@ function withCallback(args: any[], run: (args: any[]) => Promise<any>) {
+     return p;
+ }
+ 
+-function notifyRestart() {
+-    toast(lt('확장 프로그램', 'Extensions'), lt('확장 프로그램 설정을 바꿨어요. 끈 기능은 앱을 다시 시작하면 빠집니다.', 'Extension settings changed. Restart the app to remove features you turned off.'));
+-}
+-
+ /** 확장 전용 chrome.* — ctx(백그라운드·content·팝업)마다 따로 만들고, 메시지·저장소는 연락망으로 잇는다 */
+ function makeApi(bus: Bus, ctx: Ctx) {
+     const { ext, getURL } = bus;
+@@ -628,8 +628,8 @@ function makeApi(bus: Bus, ctx: Ctx) {
+         sendMessage: (...args: any[]) => withCallback(args, (a) => deliver(bus, ['content'], a[1], { id: ext.id, url: `chrome-extension://${ext.id}/${ctx}` })),
+         reload: (...args: any[]) =>
+             withCallback(args, () => {
+-                // 앱 전체를 다시 불러오면 만들던 작품이 날아갈 수 있으므로 알리기만 한다
+-                notifyRestart();
++                // 크롬처럼 엔트리 화면을 다시 불러온다 (지금 작품은 임시 보관했다가 그대로 다시 연다)
++                reloadWithoutExtensions(lt('확장 프로그램 설정을 적용하는 중… 작품은 그대로 다시 열립니다.', 'Applying extension settings… your project will reopen as it is.'));
+                 return Promise.resolve();
+             }),
+         create: (...args: any[]) =>
+@@ -700,7 +700,7 @@ function makeApi(bus: Bus, ctx: Ctx) {
+             connect: portStub,
+             getPlatformInfo: resolved({ os: 'android', arch: 'arm', nacl_arch: 'arm' }),
+             openOptionsPage: noop,
+-            reload: (...args: any[]) => withCallback(args, () => (notifyRestart(), Promise.resolve())),
++            reload: (...args: any[]) => withCallback(args, () => (reloadWithoutExtensions(), Promise.resolve())),
+             lastError: undefined,
+         },
+         storage: { local: area, sync: area, session: area, managed: area, onChanged: event(bus.storage) },
+@@ -746,6 +746,15 @@ function runExtension(ext: ExtensionRecord, justInstalled = false) {
+         popup: () => makeApi(bus, 'popup'),
+     });
+     const ref = (k: string) => `window.__entryLocalExtensions[${JSON.stringify(ext.id)}].${k}`;
++    // 서비스 워커의 importScripts: 확장 안 파일을 차례로 바로 실행
++    (slot.background as any).__importScripts = (...paths: string[]) =>
++        paths.forEach((path) => {
++            const p = String(path).replace(/^chrome-extension:\/\/[^/]+\//, '').replace(/^\.?\//, '');
++            if (!ext.files[p]) {
++                throw new Error(`importScripts: ${path} not found`);
++            }
++            addScript(wrapWithApi(fileText(ext, p), ref('background'), `${name}/${p}`));
++        });
+     try {
+         // 백그라운드(서비스 워커) — 페이지 안에서 함께 돌린다
+         installed.clear();
+@@ -829,7 +838,7 @@ export function mountExtensionPopups(container: HTMLElement | null) {
+     container.setAttribute('data-mounted', '1');
+     buses.forEach((bus, id) => {
+         const popupPath = bus.ext.popup;
+-        if (!popupPath || !bus.ext.files[popupPath]) {
++        if (bus.hidden || !popupPath || !bus.ext.files[popupPath]) {
+             return;
+         }
+         const section = el('div', 'esm_ext');
+@@ -880,6 +889,36 @@ export function mountExtensionPopups(container: HTMLElement | null) {
+ // ── '확장 프로그램 올리기' 창 ──
+ // 엔트리의 [오브젝트 추가하기 → 파일 올리기] 창과 같은 모양 (엔트리 창 스타일을 그대로 쓴다)
+ 
++let reloader: (() => void) | null = null;
++
++/** 끄거나 지운 확장을 완전히 빼려면 화면을 다시 불러와야 한다 — 작품을 임시 보관하고 다시 불러오는 함수 (workspace 가 넣어 줌) */
++export function setExtensionReloader(fn: () => void) {
++    reloader = fn;
++}
++
++/** 이미 돌고 있던 확장을 끄거나 지웠다 → 지금 작품을 그대로 둔 채 화면을 다시 불러와 완전히 끈다 */
++function reloadWithoutExtensions(message = lt('확장 프로그램을 끄는 중… 작품은 그대로 다시 열립니다.', 'Turning off extensions… your project will reopen as it is.')) {
++    if (reloader) {
++        toast(lt('확장 프로그램', 'Extensions'), message);
++        setTimeout(() => reloader && reloader(), 300);
++    } else {
++        notifyRemoved();
++    }
++}
++
++/** 끄거나 지운 확장: 톱니바퀴 메뉴에서 팝업을 빼고, 이미 돌고 있었으면 true (다시 불러와야 완전히 빠짐) */
++function hide(id: string) {
++    const bus = buses.get(id);
++    if (bus) {
++        bus.hidden = true;
++    }
++    return running.has(id);
++}
++
++function notifyRemoved() {
++    toast(lt('확장 프로그램', 'Extensions'), lt('끄거나 지운·바꾼 확장 프로그램은 앱을 다시 시작하면 적용됩니다.', 'Restart the app to finish turning off, removing or updating extensions.'));
++}
++
+ const ROOT_ID = 'entry-local-extensions';
+ const CSS = `
+ #${ROOT_ID} { position: fixed; inset: 0; z-index: 8990; font-family: inherit; }
+@@ -938,7 +977,22 @@ export async function openExtensionPopup() {
+     header.appendChild(el('h1', '', title));
+     const back = el('button', 'btn_back__db983 imbtn_pop_close__db983');
+     back.appendChild(el('span', 'blind__db983', lt('닫기', 'Close')));
+-    back.onclick = closeExtensionPopup;
++    // X 로 닫아도 지운 확장은 지운 대로 (켜기·끄기 바꾼 것은 [추가하기]를 눌러야 적용)
++    back.onclick = async () => {
++        let restart = false;
++        try {
++            for (const t of tiles.filter((x) => x.removed)) {
++                if (!t.isNew) {
++                    await removeExtension(t.ext.id);
++                }
++                restart = hide(t.ext.id) || restart;
++            }
++        } catch (e) {
++            console.warn('extension remove failed', e);
++        }
++        closeExtensionPopup();
++        restart && reloadWithoutExtensions();
++    };
+     header.appendChild(back);
+     const right = el('div');
+     const add = el('a', 'btn__db983', lt('추가하기', 'Add'));
+@@ -1047,7 +1101,7 @@ export async function openExtensionPopup() {
+                     if (!t.isNew) {
+                         await removeExtension(t.ext.id);
+                     }
+-                    restart = restart || wasRunning;
++                    restart = hide(t.ext.id) || restart;
+                     continue;
+                 }
+                 const ext = { ...t.ext, enabled: t.selected };
+@@ -1055,6 +1109,8 @@ export async function openExtensionPopup() {
+                     await saveExtension(ext);
+                 }
+                 if (ext.enabled) {
++                    const bus = buses.get(ext.id);
++                    bus && (bus.hidden = false);
+                     if (wasRunning && running.get(ext.id) !== ext.version) {
+                         restart = true; // 이미 다른 판이 돌고 있음
+                     } else if (!wasRunning) {
+@@ -1062,6 +1118,7 @@ export async function openExtensionPopup() {
+                         started.push(ext.name);
+                     }
+                 } else if (wasRunning) {
++                    hide(ext.id);
+                     restart = true;
+                 }
+             }
+@@ -1075,10 +1132,7 @@ export async function openExtensionPopup() {
+             toast(lt('확장 프로그램', 'Extensions'), lt(`${started.join(', ')} 켜짐`, `${started.join(', ')} turned on`));
+         }
+         if (restart) {
+-            toast(
+-                lt('확장 프로그램', 'Extensions'),
+-                lt('끄거나 지운·바꾼 확장 프로그램은 앱을 다시 시작하면 적용됩니다.', 'Restart the app to finish turning off, removing or updating extensions.')
+-            );
++            reloadWithoutExtensions();
+         }
+     };
+ 
