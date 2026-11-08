@@ -1,0 +1,174 @@
+diff --git a/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
+index 95eb1edf..371151a2 100644
+--- a/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
++++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
+@@ -59,30 +59,61 @@ public class EntryAccountPlugin extends Plugin {
+ 
+     private static final String ORIGIN = "https://playentry.org";
+     // 사용자 정보 읽기 (Promise) — src/common/entryAccount.ts 의 USER_SCRIPT 와 같은 내용
++    // 줄마다 \n 을 붙인다: 한 줄로 이어 붙이면 // 주석이 뒤 코드를 다 지워 스크립트 전체가 문법 오류가 된다
+     private static final String USER_SCRIPT =
+-        "(async () => { " +
+-        "  const pick = (d) => { " +
+-        "    try { " +
+-        "      const p = (d && d.props) || {}; " +
+-        "      const s = (x) => x && x.common && x.common.user; " +
+-        "      const u = s(p.pageProps && p.pageProps.initialState) || s(p.initialState); " +
+-        "      const id = u && (u.id || u._id); " +
+-        "      if (!id) return null; " +
+-        "      // 웹판과 같은 기준: 이메일 인증 + 학생 계정 아님 → 저장 완료 창에 [작품 공유하기] " +
+-        "      return { id: String(id), username: String(u.username || ''), nickname: String(u.nickname || u.username || ''), canShare: !!(u.isEmailAuth && u.role !== 'student') }; " +
+-        "    } catch (e) { return null; } " +
+-        "  }; " +
+-        "  try { " +
+-        "    const el = document.getElementById('__NEXT_DATA__'); " +
+-        "    const d = el ? JSON.parse(el.textContent || '{}') : null; " +
+-        "    if (d && d.page !== '/signin') { const u = pick(d); if (u) return u; } " +
+-        "  } catch (e) {} " +
+-        "  try { " +
+-        "    const res = await fetch('/', { credentials: 'include', cache: 'no-store' }); " +
+-        "    const html = await res.text(); " +
+-        "    const m = /<script id=\"__NEXT_DATA__\"[^>]*>([\\s\\S]*?)<\\/script>/.exec(html); " +
+-        "    return m ? pick(JSON.parse(m[1])) : null; " +
+-        "  } catch (e) { return null; } " +
++        "(async () => {\n" +
++        "  const pick = (u) => {\n" +
++        "    const id = u && (u.id || u._id);\n" +
++        "    if (!id) return null;\n" +
++        "    // 웹판과 같은 기준: 이메일 인증 + 학생 계정 아님 → 저장 완료 창에 [작품 공유하기]\n" +
++        "    return { id: String(id), username: String(u.username || ''), nickname: String(u.nickname || u.username || ''), canShare: !!(u.isEmailAuth && u.role !== 'student') };\n" +
++        "  };\n" +
++        "  // 페이지 데이터에서 '나': common.user, 없으면 user·me 라는 이름 아래 isEmailAuth 가 있는 사용자 (남의 정보에는 isEmailAuth 가 없음)\n" +
++        "  const fromData = (d) => {\n" +
++        "    try {\n" +
++        "      const p = (d && d.props) || {};\n" +
++        "      const s = (x) => x && x.common && x.common.user;\n" +
++        "      const u = pick(s(p.pageProps && p.pageProps.initialState) || s(p.initialState));\n" +
++        "      if (u) return u;\n" +
++        "      let found = null;\n" +
++        "      const walk = (o, key, n) => {\n" +
++        "        if (found || !o || typeof o !== 'object' || n > 12) return;\n" +
++        "        if ((key === 'user' || key === 'me' || key === 'currentUser') && 'isEmailAuth' in o && (o.id || o._id)) { found = o; return; }\n" +
++        "        for (const k in o) walk(o[k], k, n + 1);\n" +
++        "      };\n" +
++        "      walk(d, '', 0);\n" +
++        "      return pick(found);\n" +
++        "    } catch (e) { return null; }\n" +
++        "  };\n" +
++        "  try {\n" +
++        "    const el = document.getElementById('__NEXT_DATA__');\n" +
++        "    const d = el ? JSON.parse(el.textContent || '{}') : null;\n" +
++        "    if (d && d.page !== '/signin') { const u = fromData(d); if (u) return u; }\n" +
++        "  } catch (e) {}\n" +
++        "  // 엔트리 API 로 직접: 지금 로그인한 나 (query { me })\n" +
++        "  try {\n" +
++        "    const h = { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Client-Type': 'Client' };\n" +
++        "    const meta = document.querySelector('meta[name=\"csrf-token\"]');\n" +
++        "    if (meta && meta.content) h['CSRF-Token'] = meta.content;\n" +
++        "    const x = localStorage.getItem('playentry_token');\n" +
++        "    if (x) h['x-token'] = x;\n" +
++        "    const ctl = typeof AbortController === 'function' ? new AbortController() : null;\n" +
++        "    const timer = ctl && setTimeout(() => ctl.abort(), 6000);\n" +
++        "    const res = await fetch('/graphql/SELECT_ME', {\n" +
++        "      method: 'POST', credentials: 'include', headers: h, signal: ctl ? ctl.signal : undefined,\n" +
++        "      body: JSON.stringify({ operationName: 'SELECT_ME', query: 'query SELECT_ME { me { id username nickname role isEmailAuth } }', variables: {} }),\n" +
++        "    });\n" +
++        "    timer && clearTimeout(timer);\n" +
++        "    const j = await res.json();\n" +
++        "    const u = pick(j && j.data && j.data.me);\n" +
++        "    if (u) return u;\n" +
++        "  } catch (e) {}\n" +
++        "  try {\n" +
++        "    const res = await fetch('/', { credentials: 'include', cache: 'no-store' });\n" +
++        "    const html = await res.text();\n" +
++        "    const m = /<script id=\"__NEXT_DATA__\"[^>]*>([\\s\\S]*?)<\\/script>/.exec(html);\n" +
++        "    return m ? fromData(JSON.parse(m[1])) : null;\n" +
++        "  } catch (e) { return null; }\n" +
+         "})()";
+ 
+     /**
+diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
+index 0d125dc3..49fc9043 100644
+--- a/src/common/buildInfo.ts
++++ b/src/common/buildInfo.ts
+@@ -6,7 +6,7 @@
+  *   - ENTRY_LOCAL_BUILD: 같은 버전 안에서 어떤 패치로 빌드됐는지 구별하는 날짜 번호
+  */
+ export const APP_VERSION = '1.2.0';
+-export const ENTRY_LOCAL_BUILD = '2026.11.07-f'; // 로그인 확인 멈춤·머리줄 겹침 고침
++export const ENTRY_LOCAL_BUILD = '2026.11.08-a'; // 안드로이드 로그인 확인 스크립트 문법 오류 고침, 엔트리 API(me)로도 확인
+ 
+ /** 앱 이름 (안드로이드 / Windows) */
+ export const APP_NAME_ANDROID = 'Entry for Android';
+diff --git a/src/common/entryAccount.ts b/src/common/entryAccount.ts
+index 24421f43..7eee6830 100644
+--- a/src/common/entryAccount.ts
++++ b/src/common/entryAccount.ts
+@@ -25,29 +25,60 @@ export const entryProfileUrl = (user: EntryUser) => `${ENTRY_ORIGIN}/profile/${e
+  * 엔트리는 로그인 후 주소만 바꾸고 페이지 데이터(__NEXT_DATA__)는 로그인 화면 것 그대로 두므로,
+  * 지금 페이지 데이터가 로그인 화면 것이면 첫 화면(/)을 직접 받아 그 안의 사용자 정보를 읽는다.
+  * (실제 사이트 확인: props.pageProps.initialState.common.user = { id, username, nickname, xToken, … })
++ * 페이지 데이터에서 못 찾으면 엔트리 API(query { me })로 직접 묻는다.
+  */
+ export const USER_SCRIPT = `(async () => {
+-  const pick = (d) => {
++  const pick = (u) => {
++    const id = u && (u.id || u._id);
++    if (!id) return null;
++    // 웹판과 같은 기준: 이메일 인증 + 학생 계정 아님 → 저장 완료 창에 [작품 공유하기]
++    return { id: String(id), username: String(u.username || ''), nickname: String(u.nickname || u.username || ''), canShare: !!(u.isEmailAuth && u.role !== 'student') };
++  };
++  // 페이지 데이터에서 '나': common.user, 없으면 user·me 라는 이름 아래 isEmailAuth 가 있는 사용자 (남의 정보에는 isEmailAuth 가 없음)
++  const fromData = (d) => {
+     try {
+       const p = (d && d.props) || {};
+       const s = (x) => x && x.common && x.common.user;
+-      const u = s(p.pageProps && p.pageProps.initialState) || s(p.initialState);
+-      const id = u && (u.id || u._id);
+-      if (!id) return null;
+-      // 웹판과 같은 기준: 이메일 인증 + 학생 계정 아님 → 저장 완료 창에 [작품 공유하기]
+-      return { id: String(id), username: String(u.username || ''), nickname: String(u.nickname || u.username || ''), canShare: !!(u.isEmailAuth && u.role !== 'student') };
++      const u = pick(s(p.pageProps && p.pageProps.initialState) || s(p.initialState));
++      if (u) return u;
++      let found = null;
++      const walk = (o, key, n) => {
++        if (found || !o || typeof o !== 'object' || n > 12) return;
++        if ((key === 'user' || key === 'me' || key === 'currentUser') && 'isEmailAuth' in o && (o.id || o._id)) { found = o; return; }
++        for (const k in o) walk(o[k], k, n + 1);
++      };
++      walk(d, '', 0);
++      return pick(found);
+     } catch (e) { return null; }
+   };
+   try {
+     const el = document.getElementById('__NEXT_DATA__');
+     const d = el ? JSON.parse(el.textContent || '{}') : null;
+-    if (d && d.page !== '/signin') { const u = pick(d); if (u) return u; }
++    if (d && d.page !== '/signin') { const u = fromData(d); if (u) return u; }
++  } catch (e) {}
++  // 엔트리 API 로 직접: 지금 로그인한 나 (query { me })
++  try {
++    const h = { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Client-Type': 'Client' };
++    const meta = document.querySelector('meta[name="csrf-token"]');
++    if (meta && meta.content) h['CSRF-Token'] = meta.content;
++    const x = localStorage.getItem('playentry_token');
++    if (x) h['x-token'] = x;
++    const ctl = typeof AbortController === 'function' ? new AbortController() : null;
++    const timer = ctl && setTimeout(() => ctl.abort(), 6000);
++    const res = await fetch('/graphql/SELECT_ME', {
++      method: 'POST', credentials: 'include', headers: h, signal: ctl ? ctl.signal : undefined,
++      body: JSON.stringify({ operationName: 'SELECT_ME', query: 'query SELECT_ME { me { id username nickname role isEmailAuth } }', variables: {} }),
++    });
++    timer && clearTimeout(timer);
++    const j = await res.json();
++    const u = pick(j && j.data && j.data.me);
++    if (u) return u;
+   } catch (e) {}
+   try {
+     const res = await fetch('/', { credentials: 'include', cache: 'no-store' });
+     const html = await res.text();
+     const m = /<script id="__NEXT_DATA__"[^>]*>([\\s\\S]*?)<\\/script>/.exec(html);
+-    return m ? pick(JSON.parse(m[1])) : null;
++    return m ? fromData(JSON.parse(m[1])) : null;
+   } catch (e) { return null; }
+ })()`;
