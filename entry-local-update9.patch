@@ -172,3 +172,4 @@ index 24421f43..7eee6830 100644
 +    return m ? fromData(JSON.parse(m[1])) : null;
    } catch (e) { return null; }
  })()`;
+ 
