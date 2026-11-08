@@ -1,0 +1,141 @@
+diff --git a/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
+index 371151a2..e3639914 100644
+--- a/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
++++ b/mobile/android/app/src/main/java/biz/softline/entrylocal/EntryAccountPlugin.java
+@@ -1372,4 +1372,52 @@ public class EntryAccountPlugin extends Plugin {
+             call.reject(tr("브라우저를 열 수 없습니다.", "Could not open the browser."));
+         }
+     }
++
++    /**
++     * 내보낸 파일을 기기의 다운로드 폴더에 바로 저장 (안드로이드 10+, 권한 필요 없음).
++     * 같은 이름이 있으면 안드로이드가 "이름 (1).ent" 처럼 바꿔 저장한다. 결과: { name, folder }
++     */
++    @PluginMethod
++    public void saveDownload(final PluginCall call) {
++        final String name = call.getString("name", "entry");
++        final String data = call.getString("data", "");
++        final String mime = call.getString("mime", "application/octet-stream");
++        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
++            call.reject("Android 10+ only", "UNSUPPORTED");
++            return;
++        }
++        new Thread(() -> {
++            final android.content.ContentResolver cr = getContext().getContentResolver();
++            android.net.Uri uri = null;
++            try {
++                android.content.ContentValues v = new android.content.ContentValues();
++                v.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name);
++                v.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mime);
++                v.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS);
++                v.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1);
++                uri = cr.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
++                if (uri == null) throw new java.io.IOException("cannot create file");
++                try (java.io.OutputStream out = cr.openOutputStream(uri)) {
++                    if (out == null) throw new java.io.IOException("cannot open file");
++                    out.write(Base64.decode(data, Base64.DEFAULT));
++                }
++                android.content.ContentValues done = new android.content.ContentValues();
++                done.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0);
++                cr.update(uri, done, null, null);
++                String saved = name;
++                try (android.database.Cursor c = cr.query(uri, new String[] { android.provider.MediaStore.MediaColumns.DISPLAY_NAME }, null, null, null)) {
++                    if (c != null && c.moveToFirst() && c.getString(0) != null) saved = c.getString(0);
++                }
++                JSObject r = new JSObject();
++                r.put("name", saved);
++                r.put("folder", android.os.Environment.DIRECTORY_DOWNLOADS);
++                call.resolve(r);
++            } catch (Exception e) {
++                if (uri != null) {
++                    try { cr.delete(uri, null, null); } catch (Exception ignored) { /* 반쯤 쓴 파일 지우기 실패 */ }
++                }
++                call.reject(String.valueOf(e.getMessage()), "FAILED");
++            }
++        }).start();
++    }
+ }
+diff --git a/src/common/buildInfo.ts b/src/common/buildInfo.ts
+index 49fc9043..0718644e 100644
+--- a/src/common/buildInfo.ts
++++ b/src/common/buildInfo.ts
+@@ -6,7 +6,7 @@
+  *   - ENTRY_LOCAL_BUILD: 같은 버전 안에서 어떤 패치로 빌드됐는지 구별하는 날짜 번호
+  */
+ export const APP_VERSION = '1.2.0';
+-export const ENTRY_LOCAL_BUILD = '2026.11.08-a'; // 안드로이드 로그인 확인 스크립트 문법 오류 고침, 엔트리 API(me)로도 확인
++export const ENTRY_LOCAL_BUILD = '2026.11.08-b'; // 파일로 내보내기 → 다운로드 폴더에 바로 저장
+ 
+ /** 앱 이름 (안드로이드 / Windows) */
+ export const APP_NAME_ANDROID = 'Entry for Android';
+diff --git a/src/renderer/components/workspace.tsx b/src/renderer/components/workspace.tsx
+index 914b9a22..a4ee4e10 100644
+--- a/src/renderer/components/workspace.tsx
++++ b/src/renderer/components/workspace.tsx
+@@ -1081,7 +1081,10 @@ class Workspace extends Component<IProps> {
+                 filePath.endsWith('.ent') ? filePath : `${filePath}.ent`
+             );
+             this.hideModalProgress();
+-            Entry.toast.success(lt('내보내기 완료', 'Export complete'), filePath);
++            // 안드로이드(save://)는 다운로드 폴더에 저장하며 저장한 이름을 따로 알려 준다
++            if (!filePath.startsWith('save://')) {
++                Entry.toast.success(lt('내보내기 완료', 'Export complete'), filePath);
++            }
+         } catch (err) {
+             console.error(err);
+             this.showModalProgress(
+diff --git a/src/renderer/helper/localProjectModal.ts b/src/renderer/helper/localProjectModal.ts
+index f0dc8105..85e863a6 100644
+--- a/src/renderer/helper/localProjectModal.ts
++++ b/src/renderer/helper/localProjectModal.ts
+@@ -488,7 +488,10 @@ export async function openLocalProjectModal(options: Options) {
+         if (destination) {
+             try {
+                 await run(destination);
+-                Entry.toast.success(lt('내보내기 완료', 'Export complete'), destination);
++                // 안드로이드(save://)는 다운로드 폴더에 저장하며 저장한 이름을 따로 알려 준다
++                if (!destination.startsWith('save://')) {
++                    Entry.toast.success(lt('내보내기 완료', 'Export complete'), destination);
++                }
+             } catch (e) {
+                 EntryModalHelper.getAlertModal(lt(`내보내지 못했습니다.\n${cloudErrorMessage(e)}`, `Could not export.\n${cloudErrorMessage(e)}`));
+             }
+diff --git a/src/web/platform.ts b/src/web/platform.ts
+index 8ad53ede..ba587035 100644
+--- a/src/web/platform.ts
++++ b/src/web/platform.ts
+@@ -1,5 +1,7 @@
+ import { Filesystem, Directory } from '@capacitor/filesystem';
+ import { Share } from '@capacitor/share';
++import { registerPlugin } from '@capacitor/core';
++import { lt } from '../common/localLang';
+ import { bytesToBase64 } from './vfs';
+ import { mimeOf } from './media';
+ 
+@@ -139,15 +141,25 @@ export function isSavePath(path: string) {
+     return typeof path === 'string' && path.startsWith(SAVE);
+ }
+ 
++const Downloads = registerPlugin<{ saveDownload(o: { name: string; data: string; mime: string }): Promise<{ name: string; folder: string }> }>('EntryAccount');
++
+ /**
+  * 만든 파일을 기기 밖으로 내보낸다.
+- * 안드로이드: 캐시에 쓰고 공유 시트(드라이브, 파일 앱, 메신저 등)를 연다.
++ * 안드로이드: 기기의 다운로드 폴더에 바로 저장한다 (안드로이드 9 이하·저장 실패 시에는 공유 시트).
+  * PC 브라우저: 다운로드.
+  */
+ export async function deliverToUser(name: string, data: Uint8Array | Blob, mime?: string) {
+     const type = mime || mimeOf(name);
+     const bytes = data instanceof Uint8Array ? data : new Uint8Array(await data.arrayBuffer());
+     if (isNative()) {
++        try {
++            const saved = await Downloads.saveDownload({ name, data: bytesToBase64(bytes), mime: type });
++            const Entry = (window as any).Entry;
++            Entry && Entry.toast && Entry.toast.success(lt('다운로드 폴더에 저장했습니다', 'Saved to Downloads'), `${lt('다운로드', 'Download')}/${saved.name}`);
++            return;
++        } catch (e) {
++            console.warn('save to Downloads failed, falling back to share', e);
++        }
+         const path = `export/${name}`;
+         const { uri } = await Filesystem.writeFile({
+             path,
